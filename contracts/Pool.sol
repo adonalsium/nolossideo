@@ -18,6 +18,16 @@ import "fixidity/contracts/FixidityLib.sol";
  * the owner, and users will be able to withdraw their ticket money and winnings, if any.
  * @dev All monetary values are stored internally as fixed point 24.
  */
+
+ // TODO:
+ // Group data structures: groups replace users in the sortition tree
+ // Need a list of groups.
+ // Invite to group
+ // Join group: your current group is credited (decreased), your new group is debited (increased)
+ // Leave group: your current gorup is credited, your new group is debited. If no new group is noted, then you become a group of one.
+ // Buy ticket: increases your count (for purposes of your pool share) and your sortition tree leaf's count
+ // Sell? Not critical
+
 contract Pool is Ownable {
   using SafeMath for uint256;
 
@@ -58,11 +68,27 @@ contract Pool is Ownable {
     COMPLETE
   }
 
+  // TODO: Modify: add group number
   struct Entry {
     address addr;
+    // this may be unneeded and expensive but I'll optimize later
+    // it shows up twice: in the struct and as the key in users dict
+    string username;
     int256 amount;
     uint256 ticketCount;
     int256 withdrawnNonFixed;
+    uint256 groupId;
+    // TODO: collectibles
+  }
+
+  struct Group {
+    address[] members;
+    // this are the members that are authorized to join the group
+    // every member has invite access
+    address[] allowedEntrants;
+    // ticketCount: computed from members in frontend
+    // amount: computed from members in frontend
+    // TODO: do I need ID?
   }
 
   bytes32 public constant SUM_TREE_KEY = "PoolPool";
@@ -74,7 +100,16 @@ contract Pool is Ownable {
   bytes32 private secret;
   State public state;
   int256 private finalAmount; //fixed point 24
+
+  // TODO: optimize
+  // We need to keep this... stored twice. Not pretty
+  // Needed to access the entry for msg.sender
   mapping (address => Entry) private entries;
+  // needed to invite by username
+  mapping (string => address) public users;
+  //mapping of groups
+  Group[] public groups;
+
   uint256 public entryCount;
   ICErc20 public moneyMarket;
   IERC20 public token;
@@ -124,10 +159,83 @@ contract Pool is Ownable {
   }
 
   /**
+   * @notice deletes the element at a given index from the array
+   * @param index the index to delte
+   * @param array the array to modify
+   * @author jmartinmcfly (copied from https://ethereum.stackexchange.com/questions/1527/how-to-delete-an-element-at-a-certain-index-in-an-array/1528)
+   */
+  function _burn(uint256 index, address[] storage array) internal {
+    require(index < array.length);
+    array[index] = array[array.length-1];
+    delete array[array.length-1];
+    array.length--;
+  }
+
+  // getter for groups
+  function _getGroup(address _addr) internal returns (uint256) {
+    return entries[_addr].groupId;
+  }
+
+  /**
+   * @notice Puts a user in a group if they've been invited and removes them from
+   *  the allowed invite list.
+   * @param _groupId The group to join
+   * @author jmartinmcfly
+   */
+  function joinGroup(uint256 _groupId) external {
+    // require the the user is in allowed
+    Group theGroup = groups[_groupId];
+    bool isAllowed = false;
+    for (uint i = 0; i < theGroup.allowedEntrants.length; i++) {
+      if (theGroup.allowedEntrants[i] == msg.sender) {
+        isAllowed = true;
+        _burn(i, theGroup.allowedEntrants);
+      }
+    }
+    require(isAllowed, "You do not have permission to join this group.")
+    theGroup.members.push(msg.sender)
+  }
+
+  /**
+  * @notice Makes msg.sender leave their given group and become a solo player
+  * @author jmartinmcfly
+  */
+  function leaveGroup() external {
+    Entry storage senderEntry = entries[msg.sender];
+    Group storage group = _getGroup(msg.sender);
+    uint index = -1;
+    for (uint i = 0; i < group.members.length; i++) {
+      if (group.members[i] == msg.sender) {
+        index = i;
+      }
+    }
+    require(index >= 0, "Something went wrong with the leave op!");
+    // remove the msg.sender from the list of members
+    _burn(index, group.members);
+    // set the groupId of the user to -1 aka "does not exist"
+    senderEntry.groupId = -1;
+  }
+
+  /**
+  * @notice Gives the passed user permission to join the group of msg.sender
+  * @param _username the username of the user to invite
+  * @author jmartinmcfly
+  */
+  function invite(string _username) {
+    // require that the user "_username" exists
+    require(users[_username].length != 0);
+    inviteeAddress = users[_username];
+    groupId = entries[inviteeAddress].groupId;
+    invitingGroup = groups[groupId];
+    invitingGroup.allowedEntrants.push(inviteeAddress);
+  }
+
+  /**
    * @notice Buys a pool ticket.  Only possible while the Pool is in the "open" state.  The
    * user can buy any number of tickets.  Each ticket is a chance at winning.
    * @param _countNonFixed The number of tickets the user wishes to buy.
    */
+   // TODO: Interrogate
   function buyTickets (int256 _countNonFixed) public requireOpen {
     require(_countNonFixed > 0, "number of tickets is less than or equal to zero");
     int256 count = FixidityLib.newFixed(_countNonFixed);
@@ -139,11 +247,17 @@ contract Pool is Ownable {
       entries[msg.sender].amount = FixidityLib.add(entries[msg.sender].amount, totalDeposit);
       entries[msg.sender].ticketCount = entries[msg.sender].ticketCount.add(uint256(_countNonFixed));
     } else {
+      // TODO: This needs to be fixed up. Hmmmm by default making a username should
+      //        give you a zero entry? What happens if you have an entry without a username?
+      //        maybe require it to send a username????
+      //        I guess you could just be nameless / unfindable. No issues there.
+      //        Just won't allow it to happen in our interface because it could be confusing.
       entries[msg.sender] = Entry(
         msg.sender,
         totalDeposit,
         uint256(_countNonFixed),
-        0
+        0,
+        -1
       );
       entryCount = entryCount.add(1);
     }
@@ -217,6 +331,7 @@ contract Pool is Ownable {
     state = State.COMPLETE;
     winningAddress = calculateWinner();
 
+    // pay the owner their fee
     uint256 fee = feeAmount();
     if (fee > 0) {
       require(token.transfer(owner(), fee), "could not transfer winnings");
@@ -253,8 +368,10 @@ contract Pool is Ownable {
       return 0;
     }
     int256 winningTotal = entry.amount;
-    if (state == State.COMPLETE && _addr == winningAddress) {
-      winningTotal = FixidityLib.add(winningTotal, netWinningsFixedPoint24());
+    Entry winningEntry = entries[winningAddress]
+    Group winningGroup = winningEntry.groupId
+    if (state == State.COMPLETE && entries[_addr].groupId == winningGroup) {
+      winningTotal = FixidityLib.add(winningTotal, netWinningsFixedPoint24(_addr));
     }
     return FixidityLib.fromFixed(winningTotal);
   }
@@ -295,10 +412,29 @@ contract Pool is Ownable {
 
   /**
    * @notice Computes the total interest earned on the pool less the fee as a fixed point 24.
+   * @param _addr the address withdrawing
    * @return The total interest earned on the pool less the fee as a fixed point 24.
    */
-  function netWinningsFixedPoint24() internal view returns (int256) {
-    return grossWinningsFixedPoint24() - feeAmountFixedPoint24();
+  function netWinningsFixedPoint24(address _addr) internal view returns (int256) {
+    // they get a valid proportion of the winning group's prize
+    // calculate their proportion
+    // IMPORTANT: This is a FixedPointFraction and should be treated as such
+    //TODO: Implement require(inWinningGroup)
+    uint256 soloTicketCount = entries[_addr].ticketCount;
+
+    uint256 groupTicketCount = 0;
+    Group winningGroup = entries[_addr].groupId
+
+    for (int i = 0; i < winningGroup.members.length; i++) {
+      groupTicketCount = groupTicketCount + inningGroup.members[i].ticketCount
+    }
+
+    // TODO: Fix this cast - probably not an issue but ya know
+    int256 proportion = newFixedFraction(int(soloTicketCount), int(groupTicketCount));
+    // TODO: check this stuff works
+    int256 grossGroupWinnings = grossWinningsFixedPoint24();
+    int256 grossPersonalWinnings = FixidityLib.multiply(grossGroupWinnings, proportion);
+    return grossPersonalWinnings - feeAmountFixedPoint24();
   }
 
   /**
@@ -418,7 +554,8 @@ contract Pool is Ownable {
       entry.addr,
       FixidityLib.fromFixed(entry.amount),
       entry.ticketCount,
-      entry.withdrawnNonFixed
+      entry.withdrawnNonFixed,
+      entry.groupId
     );
   }
 
