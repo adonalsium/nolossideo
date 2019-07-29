@@ -8,6 +8,8 @@ module.exports = function (deployer) {
     }
   ).then(
     () => {
+      deployer.link(SortitionSumTreeFactory, Pool)
+      deployer.link(FixidityLib, Pool)
       deployer.deploy(Pool);
     }
   )

@@ -78,7 +78,7 @@ contract('Pool', (accounts) => {
       feeFraction,
       theSecretHash
     )
-    pool.initialize(owner)
+    await pool.initialize(owner)
     return pool
   }
 
@@ -86,6 +86,7 @@ contract('Pool', (accounts) => {
     return await web3.eth.getBlockNumber()
   }
 
+  /*
   describe('supplyRateMantissa()', () => {
     it('should work', async () => {
       balance = await web3.eth.getBalance(admin)
@@ -192,7 +193,7 @@ contract('Pool', (accounts) => {
         assert.equal(winnings.toString(), ticketPrice.toString())
       })
     })
-    */
+    
   })
 
   // TODO: my tests
@@ -205,7 +206,9 @@ contract('Pool', (accounts) => {
     it("should create an entry for the user if they are new", async () => {
       await pool.setUsername("Biggy", {from: user1});
       response = await pool.getEntryByUsername("Biggy")
-      assert.equal(response.address, user1)
+      console.log("Biggy")
+      console.log(response)
+      assert.equal(response.addr, user1)
       assert.equal(response.username, "Biggy")
       assert.equal(response.amount.toString(), "0")
       assert.equal(response.ticketCount.toString(), "0")
@@ -217,7 +220,7 @@ contract('Pool', (accounts) => {
       await pool.setUsername("Biggy", { from: user1 });
       await pool.setUsername("Smalls", { from: user1 })
       response = await pool.getEntryByUsername("Smalls")
-      assert.equal(response.address, user1)
+      assert.equal(response.addr, user1)
       assert.equal(response.username, "Smalls")
       assert.equal(response.amount.toString(), "0")
       assert.equal(response.ticketCount.toString(), "0")
@@ -238,23 +241,26 @@ contract('Pool', (accounts) => {
       // groupId maps correctly to your group which contains only you
       await pool.createGroup({from: user1})
       entry = await pool.getEntry(user1)
-      groupIdFromContract = await pool.getGroupId({from: user1})
+      groupIdFromContract = await pool.getGroupId(user1, {from: user1})
       assert.equal(entry.groupId.toString(), "0")
       assert.equal(entry.groupId.toString(), groupIdFromContract.toString())
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 1)
-      assert.equal(invited.length, 0)
-      assert.equal(members[0], user1)
+      response = await pool.getGroup(entry.groupId)
+      console.log(response)
+      console.log(response.members)
+      console.log(response.allowedEntrants)
+      assert.equal(response.members.length, 1)
+      assert.equal(response.allowedEntrants.length, 0)
+      assert.equal(response.members[0], user1)
 
       await pool.createGroup({ from: user2 })
       entry = await pool.getEntry(user2)
-      groupIdFromContract = await pool.getGroupId({ from: user1 })
+      groupIdFromContract = await pool.getGroupId(user2, { from: user2 })
       assert.equal(entry.groupId.toString(), "1")
       assert.equal(entry.groupId.toString(), groupIdFromContract.toString())
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 1)
-      assert.equal(invited.length, 0)
-      assert.equal(members[0], user2)
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 1)
+      assert.equal(response.allowedEntrants.length, 0)
+      assert.equal(response.members[0], user2)
     })
 
     it("should work to create your own group and invite a user", async () => {
@@ -264,13 +270,14 @@ contract('Pool', (accounts) => {
       // user joins group: gone from allowedEntrants, now in members
       // new user 
       await pool.createGroup({ from: user1 })
+      await pool.setUsername("Floyd", { from: user2 })
       await pool.invite("Floyd", {from: user1})
-      entry = await pool.getGroup({from: user1});
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 1)
-      assert.equal(invited.length, 1)
-      assert.equal(members[0], user1)
-      assert.equal(invited[0], user2)
+      entry = await pool.getEntry(user1, {from: user1});
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 1)
+      assert.equal(response.allowedEntrants.length, 1)
+      assert.equal(response.members[0], user1)
+      assert.equal(response.allowedEntrants[0], user2)
     })
 
     it("should work to join a group you've been invited to", async () => {
@@ -279,19 +286,19 @@ contract('Pool', (accounts) => {
       // groupId maps correctly to their new group
       await pool.createGroup({ from: user1 })
       await pool.invite("Floyd", { from: user1 })
-      groupIdFromContract = await pool.getGroupId({ from: user1 })
-      entry = await pool.getGroup({ from: user1 });
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 1)
-      assert.equal(invited.length, 1)
-      assert.equal(members[0], user1)
-      assert.equal(invited[0], user2)
+      groupIdFromContract = await pool.getGroupId(user1, { from: user1 })
+      entry = await pool.getEntry(user1, { from: user1 });
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 1)
+      assert.equal(response.allowedEntrants.length, 1)
+      assert.equal(response.members[0], user1)
+      assert.equal(response.allowedEntrants[0], user2)
       await pool.joinGroup(groupIdFromContract, {from: user2});
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 2)
-      assert.equal(invited.length, 0)
-      assert.equal(members[0], user1)
-      assert.equal(members[1], user2)
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 2)
+      assert.equal(response.allowedEntrants.length, 0)
+      assert.equal(response.members[0], user1)
+      assert.equal(response.members[1], user2)
     })
 
     it("should work to leave a group", async () => {
@@ -302,28 +309,28 @@ contract('Pool', (accounts) => {
       // groupId maps correctly to their new group
       await pool.createGroup({ from: user1 })
       await pool.invite("Floyd", { from: user1 })
-      groupIdFromContract = await pool.getGroupId({ from: user1 })
-      entry = await pool.getGroup({ from: user1 });
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 1)
-      assert.equal(invited.length, 1)
-      assert.equal(members[0], user1)
-      assert.equal(invited[0], user2)
+      groupIdFromContract = await pool.getGroupId(user1, { from: user1 })
+      entry = await pool.getEntry(user1, { from: user1 });
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 1)
+      assert.equal(response.allowedEntrants.length, 1)
+      assert.equal(response.members[0], user1)
+      assert.equal(response.allowedEntrants[0], user2)
       await pool.joinGroup(groupIdFromContract, { from: user2 });
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 2)
-      assert.equal(invited.length, 0)
-      assert.equal(members[0], user1)
-      assert.equal(members[1], user2)
-      await pool.leaveGroup(groupIdFromContract, {from: user2});
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 1)
-      assert.equal(invited.length, 0)
-      assert.equal(members[0], user1)
-      await pool.leaveGroup(groupIdFromContract, { from: user1 });
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 0)
-      assert.equal(invited.length, 0)
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 2)
+      assert.equal(response.allowedEntrants.length, 0)
+      assert.equal(response.members[0], user1)
+      assert.equal(response.members[1], user2)
+      await pool.leaveGroup({from: user2});
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 1)
+      assert.equal(response.allowedEntrants.length, 0)
+      assert.equal(response.members[0], user1)
+      await pool.leaveGroup({ from: user1 });
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 0)
+      assert.equal(response.allowedEntrants.length, 0)
     })
 
     // TODO: Eh
@@ -356,11 +363,12 @@ contract('Pool', (accounts) => {
 
     it("should work if you are already invited ", async () => {
       await pool.joinGroup(0, { from: user3 });
-      [members, invited] = await pool.getGroup(entry.groupId)
-      assert.equal(members.length, 2)
-      assert.equal(invited.length, 0)
-      assert.equal(members[0], user1)
-      assert.equal(members[1], user2)
+      response = await pool.getGroup(entry.groupId)
+      assert.equal(response.members.length, 2)
+      assert.equal(response.allowedEntrants.length, 0)
+      console.log(response)
+      assert.equal(response.members[0], user1)
+      assert.equal(response.members[1], user3)
     })
 
     it("should not work if the user is already in a group", async () => {
@@ -396,7 +404,8 @@ contract('Pool', (accounts) => {
       assert.ok(failed)
     })
   })
-
+  */
+ 
   describe("Buying tickets", () => {
     beforeEach(async () => {
       await token.approve(pool.address, priceForTenTickets, { from: user1 })

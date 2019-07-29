@@ -226,6 +226,9 @@ contract Pool is Ownable {
     }
     require(isAllowed, "You do not have permission to join this group.");
     theGroup.members.push(msg.sender);
+    // change the entry to match the new group status
+    Entry storage newGroupMember = activeEntries[msg.sender];
+    newGroupMember.groupId = _groupId;
   }
 
   /**
@@ -249,6 +252,10 @@ contract Pool is Ownable {
     senderEntry.groupId = -1;
   }
 
+  event TesterGroupID(int256 theGroup);
+  event TesterAddress(address theAddressInvitee);
+  event TesterGroupState(uint256 theLength);
+
   /**
   * @notice Gives the passed user permission to join the group of msg.sender
   * @param _username the username of the user to invite
@@ -258,7 +265,10 @@ contract Pool is Ownable {
     // require that the user "_username" exists
     require(users[_username] != address(0), "User doesn't exist");
     address inviteeAddress = users[_username];
-    int256 groupId = activeEntries[inviteeAddress].groupId;
+    emit TesterAddress(inviteeAddress);
+    int256 groupId = activeEntries[msg.sender].groupId;
+    emit TesterGroupID(groupId);
+    emit TesterGroupState(groups.length);
     Group storage invitingGroup = groups[uint(groupId)];
     invitingGroup.allowedEntrants.push(inviteeAddress);
   }
@@ -266,6 +276,8 @@ contract Pool is Ownable {
   function setUsername(string calldata _username) external {
     if (_hasEntry(msg.sender)) {
       users[_username] = msg.sender;
+      Entry storage entryToModify = activeEntries[msg.sender];
+      entryToModify.username = _username;
     } else {
       activeEntries[msg.sender] = Entry(
         msg.sender,
@@ -291,8 +303,8 @@ contract Pool is Ownable {
     uint256 totalDepositNonFixed = uint256(FixidityLib.fromFixed(totalDeposit));
     require(token.transferFrom(msg.sender, address(this), totalDepositNonFixed), "token transfer failed");
     // send the newly sent tokens to the moneymarket
-    require(token.approve(address(moneyMarket), totalDepositNonFixed), "could not approve money market spend");
-    require(moneyMarket.mint(totalDepositNonFixed) == 0, "could not supply money market");
+    // require(token.approve(address(moneyMarket), totalDepositNonFixed), "could not approve money market spend");
+    // require(moneyMarket.mint(totalDepositNonFixed) == 0, "could not supply money market");
 
     pendingAddresses.push(msg.sender);
 
