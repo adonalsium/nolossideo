@@ -534,7 +534,14 @@ contract Pool is Ownable {
         // update sum tree to reflect withdrawn principle
         sortitionSumTrees.set(SUM_TREE_KEY, uint256(entry.amount), bytes32(uint256(msg.sender)));
       }
+    } else {
+      entry.amount = FixidityLib.subtract(entry.amount, principleToWithdraw);
+      entry.ticketCount = entry.ticketCount - _numTickets;
+      // update sum tree to reflect withdrawn principle
+      sortitionSumTrees.set(SUM_TREE_KEY, uint256(entry.amount), bytes32(uint256(msg.sender)));
     }
+    emit TotalWinnings(FixidityLib.fromFixed(principleToWithdraw));
+    emit TotalWinnings(FixidityLib.fromFixed(prizeToWithdraw));
     // calculate total withdrawal amount
     int256 totalToWithdraw = FixidityLib.add(prizeToWithdraw, principleToWithdraw);
     int256 totalToWithdrawNonFixed = FixidityLib.fromFixed(totalToWithdraw);

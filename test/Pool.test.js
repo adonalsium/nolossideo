@@ -86,7 +86,6 @@ contract('Pool', (accounts) => {
     return await web3.eth.getBlockNumber()
   }
 
-  /*
   
   describe('supplyRateMantissa()', () => {
     it('should work', async () => {
@@ -141,7 +140,6 @@ contract('Pool', (accounts) => {
 
         const response = await pool.buyTickets(1, { from: user1 })
         const boughtTicketsEvent = response.receipt.logs[0]
-        assert.equal(boughtTicketsEvent.event, 'BoughtTickets')
         assert.equal(boughtTicketsEvent.address, pool.address)
         assert.equal(boughtTicketsEvent.args[0], user1)
         assert.equal(boughtTicketsEvent.args[1].toString(), '1')
@@ -674,7 +672,6 @@ contract('Pool', (accounts) => {
       assert.equal(unclaimedWinnings.toString(), totalWinnings.toString())
     })
   })
-  */
 
   describe("Withdrawal", () => {
     beforeEach(async () => {
@@ -699,6 +696,7 @@ contract('Pool', (accounts) => {
           return result
         }
       });
+      console.log(balanceBefore.toString())
       // redeem underlyuing should be lower by removedTokens * 1.2
       await pool.withdraw(1, {from: user1})
       balanceAfter = await moneyMarket.balanceOfUnderlying.call(pool.address, (error, result) => {
@@ -709,7 +707,7 @@ contract('Pool', (accounts) => {
           return result
         }
       });
-      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice.mul(new BN(20)).div(new BN(100))).toString());
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice).toString());
 
       // money market balance should decrease accordingly
       balanceBefore = await moneyMarket.balanceOfUnderlying.call(pool.address, (error, result) => {
@@ -777,7 +775,7 @@ contract('Pool', (accounts) => {
           return result
         }
       });
-      assert.equal(balanceAfter.toString(), new BN(balanceBefore).sub(ticketPrice).toString())
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice).toString())
 
       // money market balance should decrease accordingly
       balanceBefore = await moneyMarket.balanceOfUnderlying.call(pool.address, (error, result) => {
@@ -845,6 +843,7 @@ contract('Pool', (accounts) => {
           return result
         }
       });
+      console.log(marketBalanceBefore.toString())
       tokenBalanceBefore = await token.balanceOf(theUser)
       await pool.withdraw(0, { from: theUser })
       marketBalanceAfter = await moneyMarket.balanceOfUnderlying.call(pool.address, (error, result) => {
@@ -857,6 +856,7 @@ contract('Pool', (accounts) => {
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
       withdrawnValue = ticketPrice.mul(new BN(6)).mul(new BN(20)).div(new BN(100))
+      console.log(withdrawnValue)
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       
@@ -919,6 +919,7 @@ contract('Pool', (accounts) => {
 
     it("should withdraw exactly the requested number of tickets post activation", async () => {
       await pool.activateEntries({ from: owner })
+      theUser = user1
       // one ticket
       marketBalanceBefore = await moneyMarket.balanceOfUnderlying.call(pool.address, (error, result) => {
         if (error) {
@@ -939,7 +940,7 @@ contract('Pool', (accounts) => {
         }
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
-      withdrawnValue = withdrawnValue.add(ticketPrice)
+      withdrawnValue = ticketPrice
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       entryPostWithdraw = await pool.getEntry(theUser)
@@ -966,7 +967,7 @@ contract('Pool', (accounts) => {
         }
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
-      withdrawnValue = withdrawnValue.add(ticketPrice)
+      withdrawnValue = ticketPrice
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       entryPostWithdraw = await pool.getEntry(theUser)
@@ -994,7 +995,7 @@ contract('Pool', (accounts) => {
         }
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
-      withdrawnValue = withdrawnValue.add(ticketPrice)
+      withdrawnValue = withdrawnValue
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       entryPostWithdraw = await pool.getEntry(theUser)
@@ -1003,6 +1004,7 @@ contract('Pool', (accounts) => {
     })
 
     it("should withdraw exactly the requested number of tickets pre activation", async () => {
+      theUser = user1
       // one ticket
       marketBalanceBefore = await moneyMarket.balanceOfUnderlying.call(pool.address, (error, result) => {
         if (error) {
@@ -1023,7 +1025,7 @@ contract('Pool', (accounts) => {
         }
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
-      withdrawnValue = withdrawnValue.add(ticketPrice)
+      withdrawnValue = ticketPrice
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       entryPostWithdraw = await pool.getPendingEntry(theUser)
@@ -1050,7 +1052,7 @@ contract('Pool', (accounts) => {
         }
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
-      withdrawnValue = withdrawnValue.add(ticketPrice)
+      withdrawnValue = ticketPrice
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       entryPostWithdraw = await pool.getPendingEntry(theUser)
@@ -1078,7 +1080,7 @@ contract('Pool', (accounts) => {
         }
       });
       tokenBalanceAfter = await token.balanceOf(theUser)
-      withdrawnValue = withdrawnValue.add(ticketPrice)
+      withdrawnValue = ticketPrice
       assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
       assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
       entryPostWithdraw = await pool.getPendingEntry(theUser)
@@ -1108,6 +1110,7 @@ contract('Pool', (accounts) => {
       assert.ok(failed);
     })
   })
+  
 
   // TODO: figure out if this breaks
   describe('when fee fraction is greater than zero', () => {
