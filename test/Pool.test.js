@@ -87,6 +87,7 @@ contract('Pool', (accounts) => {
   }
 
   /*
+  
   describe('supplyRateMantissa()', () => {
     it('should work', async () => {
       balance = await web3.eth.getBalance(admin)
@@ -180,20 +181,6 @@ contract('Pool', (accounts) => {
       })
 
     })
-  
-    // TODO:
-    /*
-    describe('winnings()', () => {
-      it('should return the entrants total to withdraw', async () => {
-        await token.approve(pool.address, ticketPrice, { from: user1 })
-        await pool.buyTickets(1, { from: user1 })
-
-        let winnings = await pool.winnings(user1)
-
-        assert.equal(winnings.toString(), ticketPrice.toString())
-      })
-    })
-    
   })
 
   // TODO: my tests
@@ -405,7 +392,7 @@ contract('Pool', (accounts) => {
     })
   })
   */
- 
+
   describe("Buying tickets", () => {
     beforeEach(async () => {
       await token.approve(pool.address, priceForTenTickets, { from: user1 })

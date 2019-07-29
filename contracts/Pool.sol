@@ -301,7 +301,7 @@ contract Pool is Ownable {
     int256 count = FixidityLib.newFixed(_countNonFixed);
     int256 totalDeposit = FixidityLib.multiply(ticketPrice, count);
     uint256 totalDepositNonFixed = uint256(FixidityLib.fromFixed(totalDeposit));
-    require(token.transferFrom(msg.sender, address(this), totalDepositNonFixed), "token transfer failed");
+    // require(token.transferFrom(msg.sender, address(this), totalDepositNonFixed), "token transfer failed");
     // send the newly sent tokens to the moneymarket
     // require(token.approve(address(moneyMarket), totalDepositNonFixed), "could not approve money market spend");
     // require(moneyMarket.mint(totalDepositNonFixed) == 0, "could not supply money market");
