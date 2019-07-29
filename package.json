@@ -22,7 +22,7 @@
     "console": "truffle console --network local",
     "console-rinkeby": "truffle console --network rinkeby",
     "console-mainnet": "truffle console --network mainnet",
-    "version": "truffle version"    
+    "version": "truffle version"
   },
   "dependencies": {
     "chalk": "2.4.2",

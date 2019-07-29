@@ -19,14 +19,7 @@ import "fixidity/contracts/FixidityLib.sol";
  * @dev All monetary values are stored internally as fixed point 24.
  */
 
- // TODO:
- // Group data structures: groups replace users in the sortition tree
- // Need a list of groups.
- // Invite to group
- // Join group: your current group is credited (decreased), your new group is debited (increased)
- // Leave group: your current gorup is credited, your new group is debited. If no new group is noted, then you become a group of one.
- // Buy ticket: increases your count (for purposes of your pool share) and your sortition tree leaf's count
- // Sell? Not critical
+// WARNING: This contract will break if the amount of interest earned is negative (is that possible?).
 
 contract Pool is Ownable {
   using SafeMath for uint256;
@@ -44,7 +37,7 @@ contract Pool is Ownable {
    * @param sender The user that is withdrawing from the pool
    * @param amount The amount that the user withdrew
    */
-  event Withdrawn(address indexed sender, int256 amount);
+  event Withdrawn(address indexed sender, int256 amount, int256 remainingTickets);
 
   /**
    * Emitted when the pool is locked.
@@ -57,28 +50,26 @@ contract Pool is Ownable {
   event PoolUnlocked();
 
   /**
-   * Emitted when the pool is complete
+   * Emitted when the pool is complete. Total Winnings is unifixed.
    */
-  event PoolComplete(address indexed winner);
+  event DrawingComplete(int256 winningGroup, int256 totalWinnings);
 
-  enum State {
-    OPEN,
-    LOCKED,
-    UNLOCKED,
-    COMPLETE
-  }
-
-  // TODO: Modify: add group number
   struct Entry {
     address addr;
     // this may be unneeded and expensive but I'll optimize later
     // it shows up twice: in the struct and as the key in users dict
     string username;
-    int256 amount;
-    uint256 ticketCount;
-    int256 withdrawnNonFixed;
-    uint256 groupId;
+    int256 amount; // this is fixedPoint24
+    int256 ticketCount;
+    int256 totalWinnings; // this is fixedPoint24
+    int256 groupId;
     // TODO: collectibles
+  }
+
+  struct PendingEntry {
+    address addr;
+    int256 amount; // fixedPoint24
+    int256 ticketCount;
   }
 
   struct Group {
@@ -88,36 +79,41 @@ contract Pool is Ownable {
     address[] allowedEntrants;
     // ticketCount: computed from members in frontend
     // amount: computed from members in frontend
-    // TODO: do I need ID?
   }
 
   bytes32 public constant SUM_TREE_KEY = "PoolPool";
+  bool public hasActivated = false;
 
-  int256 private totalAmount; // fixed point 24
-  uint256 private lockStartBlock;
-  uint256 private lockEndBlock;
+  // total principle
+  int256 private principleAmount; // fixed point 24
   bytes32 private secretHash;
   bytes32 private secret;
-  State public state;
+  // total principle + interest
   int256 private finalAmount; //fixed point 24
+  // winnings from previous draws that are unclaimed and therefore still in compound
+  int256 private unclaimedWinnings; // fixed point 24
+  // When new winnings are calculated in each drawing, the prize pool is calculated as
+  // finalAmount - unclaimedWinnings - principleAmount
 
   // TODO: optimize
   // We need to keep this... stored twice. Not pretty
   // Needed to access the entry for msg.sender
-  mapping (address => Entry) private entries;
+  mapping (address => Entry) private activeEntries;
   // needed to invite by username
-  mapping (string => address) public users;
+  mapping (string => address) private users;
   //mapping of groups
-  Group[] public groups;
+  Group[] private groups;
+  mapping (address => PendingEntry) private pendingEntries;
+  // Needed to loops over pendingEntries in activateEntries
+  address[] pendingAddresses;
 
   uint256 public entryCount;
   ICErc20 public moneyMarket;
   IERC20 public token;
   int256 private ticketPrice; //fixed point 24
   int256 private feeFraction; //fixed point 24
-  bool private ownerHasWithdrawn;
-  bool public allowLockAnytime;
   address private winningAddress;
+  int256 private winningGroup;
 
   using SortitionSumTreeFactory for SortitionSumTreeFactory.SortitionSumTrees;
   SortitionSumTreeFactory.SortitionSumTrees internal sortitionSumTrees;
@@ -126,21 +122,17 @@ contract Pool is Ownable {
    * @notice Creates a new Pool.
    * @param _moneyMarket The Compound money market to supply tokens to.
    * @param _token The ERC20 token to be used.
-   * @param _lockStartBlock The block number on or after which the deposit can be made to Compound
-   * @param _lockEndBlock The block number on or after which the Compound supply can be withdrawn
    * @param _ticketPrice The price of each ticket (fixed point 18)
    * @param _feeFractionFixedPoint18 The fraction of the winnings going to the owner (fixed point 18)
+   * @param _secretHash the secret hash for the first drawing
    */
   constructor (
     ICErc20 _moneyMarket,
     IERC20 _token,
-    uint256 _lockStartBlock,
-    uint256 _lockEndBlock,
     int256 _ticketPrice,
     int256 _feeFractionFixedPoint18,
-    bool _allowLockAnytime
+    bytes32 _secretHash
   ) public {
-    require(_lockEndBlock > _lockStartBlock, "lock end block is not after start block");
     require(address(_moneyMarket) != address(0), "money market address cannot be zero");
     require(address(_token) != address(0), "token address cannot be zero");
     require(_ticketPrice > 0, "ticket price must be greater than zero");
@@ -150,12 +142,29 @@ contract Pool is Ownable {
     ticketPrice = FixidityLib.newFixed(_ticketPrice);
     sortitionSumTrees.createTree(SUM_TREE_KEY, 4);
 
-    state = State.OPEN;
     moneyMarket = _moneyMarket;
     token = _token;
-    lockStartBlock = _lockStartBlock;
-    lockEndBlock = _lockEndBlock;
-    allowLockAnytime = _allowLockAnytime;
+  }
+
+  modifier hasEntry {
+    require(activeEntries[msg.sender].addr == msg.sender, "The user has not yet entered the game. Buy a ticket first.");
+    _;
+  }
+
+  modifier hasGroup {
+    require(activeEntries[msg.sender].addr == msg.sender, "The user has not yet entered the game. Buy a ticket first.");
+    require(activeEntries[msg.sender].groupId >= 0, "The user has not created or joined a group yet.");
+    _;
+  }
+
+  modifier isSolo {
+    require(activeEntries[msg.sender].addr == msg.sender, "The user has not yet entered the game. Buy a ticket first.");
+    require(activeEntries[msg.sender].groupId == -1, "The user is already in a group. They should leave before joining another.");
+    _;
+  }
+
+  function getUnclaimedWinnings() external view returns (int256) {
+    return unclaimedWinnings;
   }
 
   /**
@@ -165,15 +174,37 @@ contract Pool is Ownable {
    * @author jmartinmcfly (copied from https://ethereum.stackexchange.com/questions/1527/how-to-delete-an-element-at-a-certain-index-in-an-array/1528)
    */
   function _burn(uint256 index, address[] storage array) internal {
-    require(index < array.length);
+    require(index < array.length, "Bad Index");
     array[index] = array[array.length-1];
     delete array[array.length-1];
     array.length--;
   }
 
   // getter for groups
-  function _getGroup(address _addr) internal returns (uint256) {
-    return entries[_addr].groupId;
+  function getGroupId(address _addr) public view returns (int256) {
+    return activeEntries[_addr].groupId;
+  }
+
+  function getGroup(uint256 groupId) public view returns (
+    address[] memory members,
+    address[] memory allowedEntrants
+  ) {
+    Group storage theGroup = groups[groupId];
+    return (theGroup.members, theGroup.allowedEntrants);
+  }
+
+  /**
+   * @notice Creates a new group and places msg.sender within it
+   */
+   // WARNING: this may not work. I may need to make a mapping for groups
+   //           and store the keys for that mapping in an array
+  function createGroup() external hasEntry {
+    int newGroupId = int(groups.length);
+    groups.length += 1;
+    Group storage newGroup = groups[uint(newGroupId)];
+    newGroup.members.push(msg.sender);
+    Entry storage senderEntry = activeEntries[msg.sender];
+    senderEntry.groupId = newGroupId;
   }
 
   /**
@@ -182,34 +213,36 @@ contract Pool is Ownable {
    * @param _groupId The group to join
    * @author jmartinmcfly
    */
-  function joinGroup(uint256 _groupId) external {
+  function joinGroup(int256 _groupId) external hasEntry isSolo {
     // require the the user is in allowed
-    Group theGroup = groups[_groupId];
+    Group storage theGroup = groups[uint(_groupId)];
     bool isAllowed = false;
     for (uint i = 0; i < theGroup.allowedEntrants.length; i++) {
       if (theGroup.allowedEntrants[i] == msg.sender) {
         isAllowed = true;
+        // WARNING: This may get funky because storage
         _burn(i, theGroup.allowedEntrants);
       }
     }
-    require(isAllowed, "You do not have permission to join this group.")
-    theGroup.members.push(msg.sender)
+    require(isAllowed, "You do not have permission to join this group.");
+    theGroup.members.push(msg.sender);
   }
 
   /**
   * @notice Makes msg.sender leave their given group and become a solo player
   * @author jmartinmcfly
   */
-  function leaveGroup() external {
-    Entry storage senderEntry = entries[msg.sender];
-    Group storage group = _getGroup(msg.sender);
-    uint index = -1;
+  function leaveGroup() external hasEntry hasGroup {
+    Entry storage senderEntry = activeEntries[msg.sender];
+    // WARNING: This may get funky because storage
+    Group storage group = groups[uint(getGroupId(msg.sender))];
+    uint index = group.members.length;
     for (uint i = 0; i < group.members.length; i++) {
       if (group.members[i] == msg.sender) {
         index = i;
       }
     }
-    require(index >= 0, "Something went wrong with the leave op!");
+    require(index < group.members.length, "Something went wrong with the leave op!");
     // remove the msg.sender from the list of members
     _burn(index, group.members);
     // set the groupId of the user to -1 aka "does not exist"
@@ -221,13 +254,29 @@ contract Pool is Ownable {
   * @param _username the username of the user to invite
   * @author jmartinmcfly
   */
-  function invite(string _username) {
+  function invite(string calldata _username) external hasEntry hasGroup {
     // require that the user "_username" exists
-    require(users[_username].length != 0);
-    inviteeAddress = users[_username];
-    groupId = entries[inviteeAddress].groupId;
-    invitingGroup = groups[groupId];
+    require(users[_username] != address(0), "User doesn't exist");
+    address inviteeAddress = users[_username];
+    int256 groupId = activeEntries[inviteeAddress].groupId;
+    Group storage invitingGroup = groups[uint(groupId)];
     invitingGroup.allowedEntrants.push(inviteeAddress);
+  }
+
+  function setUsername(string calldata _username) external {
+    if (_hasEntry(msg.sender)) {
+      users[_username] = msg.sender;
+    } else {
+      activeEntries[msg.sender] = Entry(
+        msg.sender,
+        _username,
+        0,
+        0,
+        0,
+        -1
+      );
+      users[_username] = msg.sender;
+    }
   }
 
   /**
@@ -235,109 +284,164 @@ contract Pool is Ownable {
    * user can buy any number of tickets.  Each ticket is a chance at winning.
    * @param _countNonFixed The number of tickets the user wishes to buy.
    */
-   // TODO: Interrogate
-  function buyTickets (int256 _countNonFixed) public requireOpen {
+  function buyTickets (int256 _countNonFixed) public {
     require(_countNonFixed > 0, "number of tickets is less than or equal to zero");
     int256 count = FixidityLib.newFixed(_countNonFixed);
     int256 totalDeposit = FixidityLib.multiply(ticketPrice, count);
     uint256 totalDepositNonFixed = uint256(FixidityLib.fromFixed(totalDeposit));
     require(token.transferFrom(msg.sender, address(this), totalDepositNonFixed), "token transfer failed");
+    // send the newly sent tokens to the moneymarket
+    require(token.approve(address(moneyMarket), totalDepositNonFixed), "could not approve money market spend");
+    require(moneyMarket.mint(totalDepositNonFixed) == 0, "could not supply money market");
+
+    pendingAddresses.push(msg.sender);
 
     if (_hasEntry(msg.sender)) {
-      entries[msg.sender].amount = FixidityLib.add(entries[msg.sender].amount, totalDeposit);
-      entries[msg.sender].ticketCount = entries[msg.sender].ticketCount.add(uint256(_countNonFixed));
+      if (!_hasPendingEntry(msg.sender)) {
+        pendingEntries[msg.sender] = PendingEntry(msg.sender, totalDeposit, _countNonFixed);
+      }
+      pendingEntries[msg.sender].amount = FixidityLib.add(pendingEntries[msg.sender].amount, totalDeposit);
+      pendingEntries[msg.sender].ticketCount = pendingEntries[msg.sender].ticketCount + _countNonFixed;
     } else {
-      // TODO: This needs to be fixed up. Hmmmm by default making a username should
-      //        give you a zero entry? What happens if you have an entry without a username?
-      //        maybe require it to send a username????
-      //        I guess you could just be nameless / unfindable. No issues there.
-      //        Just won't allow it to happen in our interface because it could be confusing.
-      entries[msg.sender] = Entry(
+      activeEntries[msg.sender] = Entry(
         msg.sender,
-        totalDeposit,
-        uint256(_countNonFixed),
+        "",
+        FixidityLib.newFixed(0),
         0,
+        FixidityLib.newFixed(0),
         -1
       );
+      pendingEntries[msg.sender] = PendingEntry(msg.sender, totalDeposit, _countNonFixed);
       entryCount = entryCount.add(1);
     }
 
-    int256 amountNonFixed = FixidityLib.fromFixed(entries[msg.sender].amount);
-    sortitionSumTrees.set(SUM_TREE_KEY, uint256(amountNonFixed), bytes32(uint256(msg.sender)));
-
-    totalAmount = FixidityLib.add(totalAmount, totalDeposit);
+    principleAmount = FixidityLib.add(principleAmount, totalDeposit);
 
     // the total amount cannot exceed the max pool size
-    require(totalAmount <= maxPoolSizeFixedPoint24(FixidityLib.maxFixedDiv()), "pool size exceeds maximum");
+    require(principleAmount <= maxPoolSizeFixedPoint24(FixidityLib.maxFixedDiv()), "pool size exceeds maximum");
 
     emit BoughtTickets(msg.sender, _countNonFixed, totalDepositNonFixed);
   }
 
   /**
-   * @notice Pools the deposits and supplies them to Compound.
-   * Can only be called by the owner when the pool is open.
-   * Fires the PoolLocked event.
-   */
-  function lock(bytes32 _secretHash) external requireOpen onlyOwner {
-    if (allowLockAnytime) {
-      lockStartBlock = block.number;
-    } else {
-      require(block.number >= lockStartBlock, "pool can only be locked on or after lock start block");
-    }
-    require(_secretHash != 0, "secret hash must be defined");
-    secretHash = _secretHash;
-    state = State.LOCKED;
-
-    if (totalAmount > 0) {
-      uint256 totalAmountNonFixed = uint256(FixidityLib.fromFixed(totalAmount));
-      require(token.approve(address(moneyMarket), totalAmountNonFixed), "could not approve money market spend");
-      require(moneyMarket.mint(totalAmountNonFixed) == 0, "could not supply money market");
-    }
-
-    emit PoolLocked();
-  }
-
-  function unlock() public requireLocked {
-    if (allowLockAnytime && msg.sender == owner()) {
-      lockEndBlock = block.number;
-    } else {
-      require(lockEndBlock < block.number, "pool cannot be unlocked yet");
-    }
-
-    uint256 balance = moneyMarket.balanceOfUnderlying(address(this));
-
-    if (balance > 0) {
-      require(moneyMarket.redeemUnderlying(balance) == 0, "could not redeem from compound");
-      finalAmount = FixidityLib.newFixed(int256(balance));
-    }
-
-    state = State.UNLOCKED;
-
-    emit PoolUnlocked();
-  }
-
-  /**
-   * @notice Withdraws the deposit from Compound and selects a winner.
-   * Can only be called by the owner after the lock end block.
+   * @notice Selects a winning address (and therefore group) and
+   * updates winnings of winning group members.
+   * @param _secret the secret for this drawing
+   * @param _newSecretHash the hash of the secret for the next drawing
    * Fires the PoolUnlocked event.
    */
-  function complete(bytes32 _secret) public onlyOwner {
-    if (state == State.LOCKED) {
-      unlock();
-    }
-    require(state == State.UNLOCKED, "state must be unlocked");
+  function draw(bytes32 _secret, bytes32 _newSecretHash) public onlyOwner {
+    require(hasActivated, "the pool has not been activated yet");
     require(keccak256(abi.encodePacked(_secret)) == secretHash, "secret does not match");
+    // we store the secret in the contract for ease of passing around and so
+    // users can (with some annoyance) recreate a drawing themselves
     secret = _secret;
-    state = State.COMPLETE;
     winningAddress = calculateWinner();
-
+    winningGroup = activeEntries[winningAddress].groupId;
+    require(_newSecretHash != 0, "secret hash must be defined");
+    // set new secret hash for next drawing
+    secretHash = _newSecretHash;
+    int256 totalWinningsFixed = updatePayouts(winningAddress);
     // pay the owner their fee
     uint256 fee = feeAmount();
     if (fee > 0) {
       require(token.transfer(owner(), fee), "could not transfer winnings");
     }
 
-    emit PoolComplete(winningAddress);
+    // shift entries from pendingEntries to activeEntries
+    activateEntriesInternal();
+    emit DrawingComplete(winningGroup, FixidityLib.fromFixed(totalWinningsFixed));
+  }
+
+  /**
+    * @notice Shifts all inactive entries to active entries and updates sortition tree/
+    *   This will normally only be called by draw. However, before the first ever drawing
+    *   in the history of the contract, this will be called manually by the pool operator.
+    * @author jmartinmcfly
+   */
+   // TODO: address potential gas limit issues here
+  function activateEntries() public onlyOwner {
+    require(!hasActivated, "You have already activated the pool");
+    hasActivated = true;
+    // update Entries
+    for (uint i = 0; i < pendingAddresses.length; i++) {
+      PendingEntry storage current = pendingEntries[pendingAddresses[i]];
+      Entry storage currentActive = activeEntries[current.addr];
+      currentActive.amount = FixidityLib.add(current.amount, currentActive.amount);
+      currentActive.ticketCount = currentActive.ticketCount + current.ticketCount;
+      //clear the pendingEntry
+      current.amount = FixidityLib.newFixed(0);
+      current.ticketCount = 0;
+      // update sortition tree entry
+      sortitionSumTrees.set(SUM_TREE_KEY, uint256(FixidityLib.fromFixed(currentActive.amount)), bytes32(uint256(current.addr)));
+    }
+
+    delete pendingAddresses;
+  }
+
+  /**
+    * @notice Shifts all inactive entries to active entries and updates sortition tree/
+    *   This will normally only be called by draw. However, before the first ever drawing
+    *   in the history of the contract, this will be called manually by the pool operator.
+    * @author jmartinmcfly
+   */
+   // TODO: address potential gas limit issues here
+  function activateEntriesInternal() internal onlyOwner {
+    // update Entries
+    for (uint i = 0; i < pendingAddresses.length; i++) {
+      PendingEntry storage current = pendingEntries[pendingAddresses[i]];
+      Entry storage currentActive = activeEntries[current.addr];
+      currentActive.amount = FixidityLib.add(current.amount, currentActive.amount);
+      currentActive.ticketCount = currentActive.ticketCount + current.ticketCount;
+      //clear the pendingEntry
+      current.amount = FixidityLib.newFixed(0);
+      current.ticketCount = 0;
+      // update sortition tree entry
+      sortitionSumTrees.set(SUM_TREE_KEY, uint256(FixidityLib.fromFixed(currentActive.amount)), bytes32(uint256(current.addr)));
+    }
+
+    delete pendingAddresses;
+  }
+
+  /**
+   * @notice Updates the payouts of all activeEntries in the winning group (entry.totalWinnings).
+   *  Also updates unclaimedWinnings to reflect the new set of winners,
+   *  Effectively resetting the prize pool.
+   * @param _winningAddress The address of the winning entry
+   * @author jmartinmcfly
+  */
+  function updatePayouts(address _winningAddress) internal returns (int256) {
+    int totalWinningsFixed;
+    // determine group of address
+    Entry storage winner = activeEntries[_winningAddress];
+    // TODO: hacky, change group structure later
+    if (winner.groupId == -1) {
+      // winner gets the whole shebang
+      totalWinningsFixed = netWinningsFixedPoint24();
+      // reset prize pool
+      unclaimedWinnings = FixidityLib.add(unclaimedWinnings, totalWinningsFixed);
+      winner.totalWinnings = FixidityLib.add(winner.totalWinnings, totalWinningsFixed);
+    } else {
+      Group storage winningGroupFull = groups[uint(winner.groupId)];
+      // calc total tickets
+      int totalTickets = 0;
+      for (uint i = 0; i < winningGroupFull.members.length; i++) {
+        totalTickets = totalTickets + activeEntries[winningGroupFull.members[i]].ticketCount;
+      }
+      // get the total winnings from the drawing (minus the fee)
+      totalWinningsFixed = netWinningsFixedPoint24();
+      // reset prize pool
+      unclaimedWinnings = FixidityLib.add(unclaimedWinnings, totalWinningsFixed);
+      // update payouts of all activeEntries in the group
+      for (uint i = 0; i < winningGroupFull.members.length; i++) {
+        Entry storage entryToChange = activeEntries[winningGroupFull.members[i]];
+        int proportion = FixidityLib.newFixedFraction(entryToChange.ticketCount, totalTickets);
+        int winningsCut = FixidityLib.multiply(proportion, totalWinningsFixed);
+        entryToChange.totalWinnings = FixidityLib.add(entryToChange.totalWinnings, winningsCut);
+      }
+    }
+
+    return totalWinningsFixed;
   }
 
   /**
@@ -345,49 +449,54 @@ contract Pool is Ownable {
    * The Pool must be unlocked.
    * The user must have deposited funds.  Fires the Withdrawn event.
    */
-  function withdraw() public {
+  function withdraw(int _numTickets) public hasEntry {
     require(_hasEntry(msg.sender), "entrant exists");
-    require(state == State.UNLOCKED || state == State.COMPLETE, "pool has not been unlocked");
-    Entry storage entry = entries[msg.sender];
-    int256 remainingBalanceNonFixed = balanceOf(msg.sender);
-    require(remainingBalanceNonFixed > 0, "entrant has already withdrawn");
-    entry.withdrawnNonFixed = entry.withdrawnNonFixed + remainingBalanceNonFixed;
+    Entry storage entry = activeEntries[msg.sender];
+    PendingEntry storage pendingEntry = pendingEntries[msg.sender];
+    require(_numTickets <= (entry.ticketCount + pendingEntry.ticketCount), "You don't have that many tickets to withdraw!");
+    int256 prizeToWithdraw = FixidityLib.newFixed(0);
 
-    emit Withdrawn(msg.sender, remainingBalanceNonFixed);
-
-    require(token.transfer(msg.sender, uint256(remainingBalanceNonFixed)), "could not transfer winnings");
-  }
-
-  /**
-   * @notice Calculates a user's winnings.  This is their deposit plus their winnings, if any.
-   * @param _addr The address of the user
-   */
-  function winnings(address _addr) public view returns (int256) {
-    Entry storage entry = entries[_addr];
-    if (entry.addr == address(0)) { //if does not have an entry
-      return 0;
+    // if user has winnings add winnings to the withdrawal and clear their
+    // winnings + decrease unclaimed winnings
+    if (FixidityLib.fromFixed(entry.totalWinnings) != 0) {
+      prizeToWithdraw = FixidityLib.add(prizeToWithdraw, entry.totalWinnings);
+      // we have now withdrawn all winnings
+      entry.totalWinnings = FixidityLib.newFixed(0);
+      unclaimedWinnings = FixidityLib.subtract(unclaimedWinnings, prizeToWithdraw);
     }
-    int256 winningTotal = entry.amount;
-    Entry winningEntry = entries[winningAddress]
-    Group winningGroup = winningEntry.groupId
-    if (state == State.COMPLETE && entries[_addr].groupId == winningGroup) {
-      winningTotal = FixidityLib.add(winningTotal, netWinningsFixedPoint24(_addr));
-    }
-    return FixidityLib.fromFixed(winningTotal);
-  }
+    // then withdraw tickets
+    int256 numTicketsFixed = FixidityLib.newFixed(_numTickets);
 
-  /**
-   * @notice Calculates a user's remaining balance.  This is their winnings less how much they've withdrawn.
-   * @return The users's current balance.
-   */
-  function balanceOf(address _addr) public view returns (int256) {
-    Entry storage entry = entries[_addr];
-    int256 winningTotalNonFixed = winnings(_addr);
-    return winningTotalNonFixed - entry.withdrawnNonFixed;
+    int256 principleToWithdraw = FixidityLib.multiply(numTicketsFixed, ticketPrice);
+
+    if (pendingEntry.ticketCount > 0) {
+      if (_numTickets <= pendingEntry.ticketCount) {
+        pendingEntry.amount = FixidityLib.subtract(pendingEntry.amount, principleToWithdraw);
+        pendingEntry.ticketCount = pendingEntry.ticketCount - _numTickets;
+      } else {
+        int256 amountLeft = FixidityLib.subtract(principleToWithdraw, pendingEntry.amount);
+        int256 ticketsLeft = _numTickets - pendingEntry.ticketCount;
+        pendingEntry.amount = FixidityLib.newFixed(0);
+        pendingEntry.ticketCount = 0;
+        // update entry
+        entry.amount = FixidityLib.subtract(entry.amount, amountLeft);
+        entry.ticketCount = entry.ticketCount - ticketsLeft;
+        // update sum tree to reflect withdrawn principle
+        sortitionSumTrees.set(SUM_TREE_KEY, uint256(entry.amount), bytes32(uint256(msg.sender)));
+      }
+    }
+    // calculate total withdrawal amount
+    int256 totalToWithdraw = FixidityLib.add(prizeToWithdraw, principleToWithdraw);
+    int256 totalToWithdrawNonFixed = FixidityLib.fromFixed(totalToWithdraw);
+    int256 remainingTickets = entry.ticketCount;
+    emit Withdrawn(msg.sender, totalToWithdrawNonFixed, remainingTickets);
+    // withdraw given amount from compound contract
+    require(moneyMarket.redeemUnderlying(uint256(totalToWithdrawNonFixed)) == 0, "could not redeem from compound");
+    require(token.transfer(msg.sender, uint256(totalToWithdrawNonFixed)), "could not transfer winnings");
   }
 
   function calculateWinner() private view returns (address) {
-    if (totalAmount > 0) {
+    if (principleAmount > 0) {
       return address(uint256(sortitionSumTrees.draw(SUM_TREE_KEY, randomToken())));
     } else {
       return address(0);
@@ -403,38 +512,11 @@ contract Pool is Ownable {
   }
 
   /**
-   * @notice Returns the total interest on the pool less the fee as a whole number
-   * @return The total interest on the pool less the fee as a whole number
+   * @notice Computes the total winnings for the drawing (interest - fee)
+   * @return the total winnings as a fixed point 24
    */
-  function netWinnings() public view returns (int256) {
-    return FixidityLib.fromFixed(netWinningsFixedPoint24());
-  }
-
-  /**
-   * @notice Computes the total interest earned on the pool less the fee as a fixed point 24.
-   * @param _addr the address withdrawing
-   * @return The total interest earned on the pool less the fee as a fixed point 24.
-   */
-  function netWinningsFixedPoint24(address _addr) internal view returns (int256) {
-    // they get a valid proportion of the winning group's prize
-    // calculate their proportion
-    // IMPORTANT: This is a FixedPointFraction and should be treated as such
-    //TODO: Implement require(inWinningGroup)
-    uint256 soloTicketCount = entries[_addr].ticketCount;
-
-    uint256 groupTicketCount = 0;
-    Group winningGroup = entries[_addr].groupId
-
-    for (int i = 0; i < winningGroup.members.length; i++) {
-      groupTicketCount = groupTicketCount + inningGroup.members[i].ticketCount
-    }
-
-    // TODO: Fix this cast - probably not an issue but ya know
-    int256 proportion = newFixedFraction(int(soloTicketCount), int(groupTicketCount));
-    // TODO: check this stuff works
-    int256 grossGroupWinnings = grossWinningsFixedPoint24();
-    int256 grossPersonalWinnings = FixidityLib.multiply(grossGroupWinnings, proportion);
-    return grossPersonalWinnings - feeAmountFixedPoint24();
+  function netWinningsFixedPoint24() internal view returns (int256) {
+    return FixidityLib.subtract(grossWinningsFixedPoint24(), feeAmountFixedPoint24());
   }
 
   /**
@@ -443,7 +525,8 @@ contract Pool is Ownable {
    * @return The total interest earned on the pool as a fixed point 24.
    */
   function grossWinningsFixedPoint24() internal view returns (int256) {
-    return FixidityLib.subtract(finalAmount, totalAmount);
+    int256 totalMinusUnclaimedPrizes = FixidityLib.subtract(finalAmount, unclaimedWinnings);
+    return FixidityLib.subtract(totalMinusUnclaimedPrizes, principleAmount);
   }
 
   /**
@@ -467,11 +550,7 @@ contract Pool is Ownable {
    * @return If the current block is before the end it returns 0, otherwise it returns the random number.
    */
   function randomToken() public view returns (uint256) {
-    if (block.number <= lockEndBlock) {
-      return 0;
-    } else {
-      return _selectRandom(uint256(FixidityLib.fromFixed(totalAmount)));
-    }
+    return _selectRandom(uint256(FixidityLib.fromFixed(principleAmount)));
   }
 
   /**
@@ -509,9 +588,6 @@ contract Pool is Ownable {
    */
   function getInfo() public view returns (
     int256 entryTotal,
-    uint256 startBlock,
-    uint256 endBlock,
-    State poolState,
     address winner,
     int256 supplyBalanceTotal,
     int256 ticketCost,
@@ -521,10 +597,7 @@ contract Pool is Ownable {
     bytes32 hashOfSecret
   ) {
     return (
-      FixidityLib.fromFixed(totalAmount),
-      lockStartBlock,
-      lockEndBlock,
-      state,
+      FixidityLib.fromFixed(principleAmount),
       winningAddress,
       FixidityLib.fromFixed(finalAmount),
       FixidityLib.fromFixed(ticketPrice),
@@ -539,23 +612,77 @@ contract Pool is Ownable {
    * @notice Retrieves information about a user's entry in the Pool.
    * @return Returns a tuple containing:
    *    addr (the address of the user)
+   *    username
    *    amount (the amount they deposited)
    *    ticketCount (the number of tickets they have bought)
-   *    withdrawn (the amount they have withdrawn)
+   *    totalWinnings (total unwithdrawn winnings of the user. Doesn't count principle)
+   *    groupId (the id of the user's group)
    */
   function getEntry(address _addr) public view returns (
     address addr,
+    string memory username,
     int256 amount,
-    uint256 ticketCount,
-    int256 withdrawn
+    int256 ticketCount,
+    int256 totalWinnings,
+    int256 groupId
   ) {
-    Entry storage entry = entries[_addr];
+    Entry storage entry = activeEntries[_addr];
     return (
       entry.addr,
+      entry.username,
       FixidityLib.fromFixed(entry.amount),
       entry.ticketCount,
-      entry.withdrawnNonFixed,
+      FixidityLib.fromFixed(entry.totalWinnings),
       entry.groupId
+    );
+  }
+
+  /**
+   * @notice Retrieves information about a user's entry in the Pool.
+   * @return Returns a tuple containing:
+   *    addr (the address of the user)
+   *    username
+   *    amount (the amount they deposited)
+   *    ticketCount (the number of tickets they have bought)
+   *    totalWinnings (total unwithdrawn winnings of the user. Doesn't count principle)
+   *    groupId (the id of the user's group)
+   */
+  function getEntryByUsername(string calldata theUsername) external view returns (
+    address addr,
+    string memory username,
+    int256 amount,
+    int256 ticketCount,
+    int256 totalWinnings,
+    int256 groupId
+  ) {
+    Entry storage entry = activeEntries[users[theUsername]];
+    return (
+      entry.addr,
+      entry.username,
+      FixidityLib.fromFixed(entry.amount),
+      entry.ticketCount,
+      FixidityLib.fromFixed(entry.totalWinnings),
+      entry.groupId
+    );
+  }
+
+  /**
+   * @notice Retrieves information about a user's pending entry in the Pool.
+   * @return Returns a tuple containing:
+   *    addr (the address of the user)
+   *    amount (the amount they deposited)
+   *    ticketCount (the number of tickets they have bought)
+   */
+  function getPendingEntry(address _addr) public view returns (
+    address addr,
+    int256 amount,
+    int256 ticketCount
+  ) {
+    PendingEntry storage pending = pendingEntries[_addr];
+    return (
+      pending.addr,
+      FixidityLib.fromFixed(pending.amount),
+      pending.ticketCount
     );
   }
 
@@ -574,8 +701,15 @@ contract Pool is Ownable {
    * @notice Estimates the current effective interest rate using the money market's current supplyRateMantissa and the lock duration in blocks.
    * @return The current estimated effective interest rate
    */
+  // TODO: Add intelligent / enforced blockDuration
   function currentInterestFractionFixedPoint24() public view returns (int256) {
-    int256 blockDuration = int256(lockEndBlock - lockStartBlock);
+    // Chose a duration of one week
+    // arbitrary and not enforced by the contract at all
+    int256 blocksPerDay = 5760;
+    int256 daysPerDrawing = 7;
+    int256 blockDuration = blocksPerDay * daysPerDrawing;
+    // TODO: CHANGE THIS
+    blockDuration = 10;
     int256 supplyRateMantissaFixedPoint24 = FixidityLib.newFixed(int256(supplyRateMantissa()), uint8(18));
     return FixidityLib.multiply(supplyRateMantissaFixedPoint24, FixidityLib.newFixed(blockDuration));
   }
@@ -594,22 +728,15 @@ contract Pool is Ownable {
    * @return Returns true if the given address bought tickets, false otherwise.
    */
   function _hasEntry(address _addr) internal view returns (bool) {
-    return entries[_addr].addr == _addr;
+    return activeEntries[_addr].addr == _addr;
   }
 
-  modifier requireOpen() {
-    require(state == State.OPEN, "state is not open");
-    _;
-  }
-
-  modifier requireLocked() {
-    require(state == State.LOCKED, "state is not locked");
-    _;
-  }
-
-  modifier requireComplete() {
-    require(state == State.COMPLETE, "pool is not complete");
-    require(block.number > lockEndBlock, "block is before lock end period");
-    _;
+  /**
+   * @notice Determines whether a given address has bought tickets
+   * @param _addr The given address
+   * @return Returns true if the given address bought tickets, false otherwise.
+   */
+  function _hasPendingEntry(address _addr) internal view returns (bool) {
+    return pendingEntries[_addr].addr == _addr;
   }
 }

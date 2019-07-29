@@ -13,7 +13,8 @@ contract('Pool', (accounts) => {
   
   const blocksPerMinute = 5
 
-  let [owner, admin, user1, user2] = accounts
+  let [owner, admin, user1, user2, user3, user4, user5, user6] = accounts
+  console.log(accounts)
 
   let ticketPrice = new BN(web3.utils.toWei('10', 'ether'))
   // let feeFraction = new BN('5' + zero_22) // equal to 0.05
@@ -23,6 +24,10 @@ contract('Pool', (accounts) => {
 
   let secret = '0x1234123412341234123412341234123412341234123412341234123412341234'
   let secretHash = web3.utils.soliditySha3(secret)
+  let secret2 = '0x1234123412341234123412341234123412341234123412341234123412341235'
+  let secretHash2 = web3.utils.soliditySha3(secret2)
+  let secret3 = '0x1234123412341234123412341234123412341234123412341234123412341236'
+  let secretHash3 = web3.utils.soliditySha3(secret3)
   let supplyRateMantissa = '100000000000000000' // 0.1 per block
 
   beforeEach(async () => {
@@ -38,9 +43,19 @@ contract('Pool', (accounts) => {
     await token.mint(moneyMarket.address, web3.utils.toWei('10000000', 'ether'))
     await token.mint(user1, web3.utils.toWei('100000', 'ether'))
     await token.mint(user2, web3.utils.toWei('100000', 'ether'))
+    await token.mint(user3, web3.utils.toWei('100000', 'ether'))
+    await token.mint(user4, web3.utils.toWei('100000', 'ether'))
+    await token.mint(user5, web3.utils.toWei('100000', 'ether'))
+    await token.mint(user6, web3.utils.toWei('100000', 'ether'))
   })
 
-  async function createPool(lockStartBlock = -1, lockEndBlock = 0, allowLockAnytime = true) {
+
+  /**
+   * Old Tests Begin
+   ----------------------------------------------------------------------------
+   */
+
+  async function createPool(theSecretHash = secretHash) {
     const block = await blockNumber()
 
     // console.log(
@@ -59,11 +74,9 @@ contract('Pool', (accounts) => {
     const pool = await Pool.new(
       moneyMarket.address,
       token.address,
-      block + lockStartBlock,
-      block + lockEndBlock,
       ticketPrice,
       feeFraction,
-      allowLockAnytime
+      theSecretHash
     )
     pool.initialize(owner)
     return pool
@@ -75,14 +88,18 @@ contract('Pool', (accounts) => {
 
   describe('supplyRateMantissa()', () => {
     it('should work', async () => {
-      pool = await createPool(0, 10) // ten blocks long
+      balance = await web3.eth.getBalance(admin)
+      console.log(balance)
+      pool = await createPool() // ten blocks long
+      supplyRate = await pool.supplyRateMantissa()
+      console.log(supplyRate)
       assert.equal(await pool.supplyRateMantissa(), web3.utils.toWei('0.1', 'ether'))
     })
   })
 
   describe('currentInterestFractionFixedPoint24()', () => {
     it('should return the right value', async () => {
-      pool = await createPool(0, 10) // ten blocks long
+      pool = await createPool() // ten blocks long
       const interestFraction = await pool.currentInterestFractionFixedPoint24()
       assert.equal(interestFraction.toString(), web3.utils.toWei('1000000', 'ether'))
     })
@@ -90,48 +107,11 @@ contract('Pool', (accounts) => {
 
   describe('maxPoolSize()', () => {
     it('should set an appropriate limit based on max integers', async () => {
-      pool = await createPool(0, 10) // ten blocks long
+      pool = await createPool() // ten blocks long
       const limit = await fixidity.newFixed(new BN('1000'))
       const maxSize = await pool.maxPoolSizeFixedPoint24(limit);
       const poolLimit = new BN('333333333333333333333333000')
       assert.equal(maxSize.toString(), poolLimit.toString())
-    })
-  })
-
-  describe('pool that is still open and must respect block start and end', () => {
-    beforeEach(async () => {
-      pool = await createPool(9, 10, false)
-    })
-
-    describe('lock()', () => {
-      it('cannot be locked before the open duration is over', async () => {
-        let failed = false
-        try {
-          await pool.lock(secretHash)
-        } catch (error) {
-          failed = true
-        }
-        assert.ok(failed, "pool should not have been able to lock()")
-      })
-    })
-  })
-
-  describe('pool that is still during the lock period', () => {
-    beforeEach(async () => {
-      pool = await createPool(-10, 10, false)
-    })
-
-    describe('complete(secret)', () => {
-      it('cannot be unlocked before the lock duration ends', async () => {
-        await pool.lock(secretHash)
-        let failed = false
-        try {
-          await pool.complete(secret)
-        } catch (error) {
-          failed = true
-        }
-        assert.ok(failed, "pool should not have been able to lock()")
-      })
     })
   })
 
@@ -174,7 +154,7 @@ contract('Pool', (accounts) => {
         await token.approve(pool.address, ticketPrice, { from: user1 })
         await pool.buyTickets(1, { from: user1 })
 
-        const response = await pool.getEntry(user1)
+        const response = await pool.getPendingEntry(user1)
         assert.equal(response.addr, user1)
         assert.equal(response.amount.toString(), ticketPrice.mul(new BN(2)).toString())
         assert.equal(response.ticketCount.toString(), '2')
@@ -188,33 +168,758 @@ contract('Pool', (accounts) => {
       })
     })
 
-    describe('lock()', () => {
-      it('should transfer tokens to the money market', async () => {
-        await token.approve(pool.address, ticketPrice, { from: user1 })
-        await pool.buyTickets(1, { from: user1 })
-        await pool.lock(secretHash)
-      })
-    })
-
-    describe('unlock()', () => {
+    describe('winner before first drawing', () => {
       beforeEach(async () => {
         await token.approve(pool.address, ticketPrice, { from: user1 })
         await pool.buyTickets(1, { from: user1 })
-        await pool.lock(secretHash)
       })
 
       it('should not have a winner until the Pool is complete', async () => {
         assert.equal(await pool.winnerAddress(), '0x0000000000000000000000000000000000000000')
       })
 
-      it('should allow anyone to unlock the pool', async () => {
-        await pool.unlock({ from: user1 })
-      })
+    })
+  
+    // TODO:
+    /*
+    describe('winnings()', () => {
+      it('should return the entrants total to withdraw', async () => {
+        await token.approve(pool.address, ticketPrice, { from: user1 })
+        await pool.buyTickets(1, { from: user1 })
 
-      it('should allow the owner to unlock the pool', async () => {
-        await pool.unlock()
-      })
+        let winnings = await pool.winnings(user1)
 
+        assert.equal(winnings.toString(), ticketPrice.toString())
+      })
+    })
+    */
+  })
+
+  // TODO: my tests
+
+  describe('setUsername()', () => {
+    beforeEach(async () => {
+      pool = await createPool()
+    })
+
+    it("should create an entry for the user if they are new", async () => {
+      await pool.setUsername("Biggy", {from: user1});
+      response = await pool.getEntryByUsername("Biggy")
+      assert.equal(response.address, user1)
+      assert.equal(response.username, "Biggy")
+      assert.equal(response.amount.toString(), "0")
+      assert.equal(response.ticketCount.toString(), "0")
+      assert.equal(response.totalWinnings.toString(), "0")
+      assert.equal(response.groupId.toString(), "-1")
+    })
+
+    it("should change their username if they already have one", async () => {
+      await pool.setUsername("Biggy", { from: user1 });
+      await pool.setUsername("Smalls", { from: user1 })
+      response = await pool.getEntryByUsername("Smalls")
+      assert.equal(response.address, user1)
+      assert.equal(response.username, "Smalls")
+      assert.equal(response.amount.toString(), "0")
+      assert.equal(response.ticketCount.toString(), "0")
+      assert.equal(response.totalWinnings.toString(), "0")
+      assert.equal(response.groupId.toString(), "-1")
+    })
+  })
+
+  describe('Group hijinks', () => {
+    beforeEach(async () => {
+      pool = await createPool()
+      await pool.setUsername("Biggy", { from: user1 })
+      await pool.setUsername("Floyd", { from: user2})
+    })
+
+    it("should work to create your own group", async () => {
+      // groupId now positive
+      // groupId maps correctly to your group which contains only you
+      await pool.createGroup({from: user1})
+      entry = await pool.getEntry(user1)
+      groupIdFromContract = await pool.getGroupId({from: user1})
+      assert.equal(entry.groupId.toString(), "0")
+      assert.equal(entry.groupId.toString(), groupIdFromContract.toString())
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 1)
+      assert.equal(invited.length, 0)
+      assert.equal(members[0], user1)
+
+      await pool.createGroup({ from: user2 })
+      entry = await pool.getEntry(user2)
+      groupIdFromContract = await pool.getGroupId({ from: user1 })
+      assert.equal(entry.groupId.toString(), "1")
+      assert.equal(entry.groupId.toString(), groupIdFromContract.toString())
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 1)
+      assert.equal(invited.length, 0)
+      assert.equal(members[0], user2)
+    })
+
+    it("should work to create your own group and invite a user", async () => {
+      // groupId now positive
+      // groupId maps correctly to your group which contains only you
+      // invite user -> your group now has user in allowedEntrants
+      // user joins group: gone from allowedEntrants, now in members
+      // new user 
+      await pool.createGroup({ from: user1 })
+      await pool.invite("Floyd", {from: user1})
+      entry = await pool.getGroup({from: user1});
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 1)
+      assert.equal(invited.length, 1)
+      assert.equal(members[0], user1)
+      assert.equal(invited[0], user2)
+    })
+
+    it("should work to join a group you've been invited to", async () => {
+      // groupId now positive
+      // user joins group: gone from allowedEntrants, now in members
+      // groupId maps correctly to their new group
+      await pool.createGroup({ from: user1 })
+      await pool.invite("Floyd", { from: user1 })
+      groupIdFromContract = await pool.getGroupId({ from: user1 })
+      entry = await pool.getGroup({ from: user1 });
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 1)
+      assert.equal(invited.length, 1)
+      assert.equal(members[0], user1)
+      assert.equal(invited[0], user2)
+      await pool.joinGroup(groupIdFromContract, {from: user2});
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 2)
+      assert.equal(invited.length, 0)
+      assert.equal(members[0], user1)
+      assert.equal(members[1], user2)
+    })
+
+    it("should work to leave a group", async () => {
+      // you are gone from group.members
+      // you're groupId is now -1
+      // groupId now positive
+      // user joins group: gone from allowedEntrants, now in members
+      // groupId maps correctly to their new group
+      await pool.createGroup({ from: user1 })
+      await pool.invite("Floyd", { from: user1 })
+      groupIdFromContract = await pool.getGroupId({ from: user1 })
+      entry = await pool.getGroup({ from: user1 });
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 1)
+      assert.equal(invited.length, 1)
+      assert.equal(members[0], user1)
+      assert.equal(invited[0], user2)
+      await pool.joinGroup(groupIdFromContract, { from: user2 });
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 2)
+      assert.equal(invited.length, 0)
+      assert.equal(members[0], user1)
+      assert.equal(members[1], user2)
+      await pool.leaveGroup(groupIdFromContract, {from: user2});
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 1)
+      assert.equal(invited.length, 0)
+      assert.equal(members[0], user1)
+      await pool.leaveGroup(groupIdFromContract, { from: user1 });
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 0)
+      assert.equal(invited.length, 0)
+    })
+
+    // TODO: Eh
+    it("should work to join, leave, and then join another", async () => {
+      // groupId now positive
+      // user joins group: gone from allowedEntrants, now in members
+      // groupId maps correctly to their new group
+
+      // you are gone from group.members
+      // you're groupId is now -1
+
+      // groupId now positive
+      // user joins group: gone from allowedEntrants, now in members
+      // groupId maps correctly to their new group
+    })
+  })
+
+  describe('When a user joins a group', () => {
+    beforeEach(async () => {
+      pool = await createPool()
+      await pool.setUsername("Biggy", { from: user1 })
+      await pool.setUsername("Floyd", { from: user2 })
+      await pool.setUsername("Queen", {from: user3})
+      await pool.setUsername("Chance", { from: user4 })
+      await pool.createGroup({ from: user1 })
+      await pool.createGroup({ from: user2 })
+      await pool.invite("Queen", { from: user1 })
+      await pool.invite("Queen", { from: user2 })
+    })
+
+    it("should work if you are already invited ", async () => {
+      await pool.joinGroup(0, { from: user3 });
+      [members, invited] = await pool.getGroup(entry.groupId)
+      assert.equal(members.length, 2)
+      assert.equal(invited.length, 0)
+      assert.equal(members[0], user1)
+      assert.equal(members[1], user2)
+    })
+
+    it("should not work if the user is already in a group", async () => {
+      let failed;
+      try { 
+        await pool.joinGroup(0, { from: user2 });
+        failed = false;
+      } catch {
+        failed = true;
+      }
+      assert.ok(failed)
+    })
+
+    it("should not work if you are not invited", async () => {
+      let failed;
+      try {
+        await pool.joinGroup(0, { from: user4 });
+        failed = false;
+      } catch {
+        failed = true;
+      }
+      assert.ok(failed)
+    })
+
+    it("should not work if you don't have an entry yet", async () => {
+      let failed;
+      try {
+        await pool.joinGroup(0, { from: user5 });
+        failed = false;
+      } catch {
+        failed = true;
+      }
+      assert.ok(failed)
+    })
+  })
+
+  describe("Buying tickets", () => {
+    beforeEach(async () => {
+      await token.approve(pool.address, priceForTenTickets, { from: user1 })
+      await token.approve(pool.address, priceForTenTickets, { from: user2 })
+      pool = await createPool()
+    })
+
+    it("should not give you extra entries for the current drawing", async () => {
+      // activeEntries = activeEntries after
+      await pool.buyTickets(1, {from: user1})
+      entry = await pool.getEntry(user1)
+      assert.equal(entry.amount.toString(), "0")
+      assert.equal(entry.ticketCount.toString(), "0")
+    })
+
+    it("should give you new entries in the next drawing", async () => {
+      // your pendingEntries should be updated
+      await pool.buyTickets(1, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(1)).toString())
+      assert.equal(response.ticketCount.toString(), '1')
+    })
+
+    it("should allow you to buy multiple tickets at once", async() => {
+      await pool.buyTickets(2, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(2)).toString())
+      assert.equal(response.ticketCount.toString(), '2')
+    })
+
+    it("should allow multiple purchases", async () => {
+      // your pendingEntries should be updated
+      await pool.buyTickets(1, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(1)).toString())
+      assert.equal(response.ticketCount.toString(), '1')
+      // your pendingEntries should be updated
+      await pool.buyTickets(1, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(2)).toString())
+      assert.equal(response.ticketCount.toString(), '2')
+      // your pendingEntries should be updated
+      await pool.buyTickets(1, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(3)).toString())
+      assert.equal(response.ticketCount.toString(), '3')
+    })
+
+    it("should send the purchasing tokens to the money market", async () => {
+      // your pendingEntries should be updated
+      await pool.buyTickets(1, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(1)).toString())
+      assert.equal(response.ticketCount.toString(), '1')
+      // money market underlying should increase by 1.2 * ticketPrice * ticketCount
+      underlyingBalance = moneyMarket.balanceOfUnderlying(pool.address)
+      assert.equal(underlyingBalance, ticketPrice.mul(new BN(1.2)))
+      // your pendingEntries should be updated
+      await pool.buyTickets(2, { from: user1 })
+      response = await pool.getPendingEntry(user1)
+      assert.equal(response.amount.toString(), ticketPrice.mul(new BN(1)).toString())
+      assert.equal(response.ticketCount.toString(), '1')
+      // money market underlying should increase by 1.2 * ticketPrice * ticketCount
+      underlyingBalance = moneyMarket.balanceOfUnderlying(pool.address)
+      assert.equal(underlyingBalance.toString(), (ticketPrice.mul(new BN(3)).mul(new BN(120)).div(new BN(100))).toString());
+    })
+  })
+
+  describe("Drawings", () => {
+    beforeEach(async () => {
+      await token.approve(pool.address, priceForTenTickets, { from: user1 })
+      await token.approve(pool.address, priceForTenTickets, { from: user2 })
+      pool = await createPool()
+      await pool.setUsername("Biggy", { from: user1 })
+      await pool.setUsername("Floyd", { from: user2 })
+      await pool.setUsername("Queen", { from: user3 })
+      await pool.setUsername("Chance", { from: user4 })
+      await pool.buyTickets(1, { from: user1 })
+      await pool.buyTickets(3, { from: user2 })
+    })
+
+    it("should award no winner before activation", async () => {
+      let failed;
+      try {
+        await pool.draw(secret, secretHash2);
+        failed = false
+      } catch {
+        failed = true
+      }
+      assert.ok(failed)
+    })
+
+    it("should work to manually activate before first drawing", async () => {
+      await pool.activateEntries({ from: owner })
+      entry1 = await pool.getEntry(user1)
+      entry2 = await pool.getEntry(user2)
+      assert.equal(entry1.amount.toString(), ticketPrice.toString())
+      assert.equal(entry1.ticketCount.toString(), "1")
+      assert.equal(entry1.amount.toString(), ticketPrice.mul(new BN(3)).toString())
+      assert.equal(entry1.ticketCount.toString(), "3")
+      pendingEntry1 = await pool.getPendingENtry(user1)
+      pendingEntry2 = await pool.getPendingENtry(user2)
+      assert.equal(pendingEntry1.ticketCount.toString(), "0")
+      assert.equal(pendingEntry1.amount.toString(), "0")
+      assert.equal(pendingEntry2.amount.toString(), "0")
+      assert.equal(pendingEntry2.ticketCount.toString(), "0")
+    })
+
+    // TODO: Nah
+    it("should choose a winner according to correct probabilities", async () => {
+      // to hardo for this project, just look realllll closely that
+      // the sortition tree is updated correctly (too lazy to insect it)
+    })
+
+    
+    it("should choose a winner", async () => {
+      // winner should be filled
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2)
+      winner = await pool.winnerAddress()
+      assert.notEqual(winner, "0x0000000000000000000000000000000000000000")
+    })
+
+    it("should set a new secret hash", async () => {
+      // secret hash should be changed
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, {from: owner})
+      hash = await pool.getInfo().hashOfSecret
+      assert.equal(hash.toString(), secretHash2.toString())
+    })
+
+    it("should allow multiple drawings", async () => {
+      // draw, winner chosen
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      hash = await pool.getInfo().hashOfSecret
+      assert.equal(hash.toString(), secretHash2.toString())
+      // draw, winner chosen
+      await pool.draw(secret2, secretHash3, { from: owner })
+    })
+
+    it("should update balances of winning group members", async () => {
+      await pool.createGroup({ from: user1 })
+      await pool.invite("Floyd", { from: user2 })
+      await pool.joinGroup(0, {from: user2})
+      // totalWinnings of each group member should be updated correctly
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      entry1 = await pool.getEntry(user1)
+      entry2 = await pool.getEntry(user2)
+      assert.equal(entry1.totalWinnings.toString(), ticketPrice.mul(new BN(20).div(new BN(100))).toString())
+      assert.equal(entry2.totalWinnings.toString(), ticketPrice.mul(new BN(3)).mul(new BN(20).div(new BN(100))).toString())
+    })
+
+    it("should update balances correctly for solo winners", async () => {
+      // totalWinnings of solo chould be updated correctly
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      winningAddress = await pool.winnerAddress()
+      winningEntry = await pool.getEntry(winningAddress)
+      assert.equal(winningEntry.totalWinnings.toString(), ticketPrice.mul(new BN(4)).mul(new BN(20)).div(new BN(100)).toString())
+    })
+
+    it("should update balances correctly for winners in group sof 1", async () => {
+      await pool.createGroup({ from: user1 })
+      await pool.createGroup({ from: user2 })
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      winningAddress = await pool.winnerAddress()
+      winningEntry = await pool.getEntry(winningAddress)
+      assert.equal(winningEntry.totalWinnings.toString(), ticketPrice.mul(new BN(4)).mul(new BN(20)).div(new BN(100)).toString())
+    })
+
+    it("should not affect the money deposited in the moneymarket", async () => {
+      before = moneyMarket.balanceOfUnderlying(pool.address)
+      // underlyingBalance should be same before and after
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      after = moneyMarket.balanceOfUnderlying(pool.address)
+      assert.equal(before.toString(), after.toString())
+    })
+
+    it("should not affect the entries of the losers", async () => {
+      // all losing entries should be the same before and after
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      winningAddress = await pool.winnerAddress()
+      if (winningAddress === user1) {
+        losingEntry = await pool.getEntry(user2)
+        assert.equal(losingEntry.totalWinnings.toString(), "0")
+      } else {
+        losingEntry = await pool.getEntry(user1)
+        assert.equal(losingEntry.totalWinnings.toString(), "0")
+      }
+    })
+
+    it("should work with multiple groups", async () => {
+      await pool.buyTickets(1, { from: user3 })
+      await pool.buyTickets(3, { from: user4 })
+      await pool.createGroup({from: user3})
+      await pool.invite("Chance", {from: user3})
+      user3Group = await pool.getGroupId(user3)
+      await pool.joinGroup(user3Group, {from: user4})
+      await pool.createGroup({from: user1})
+      await pool.invite("Floyd", {from: user1})
+      user1Group = await pool.getGroupId(user1)
+      await pool.joinGroup(user1Group, {from: user2})
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      winningAddress = await pool.winnerAddress()
+      // should work with one group
+      if (winningAddress === user1 || winningAddress === user2) {
+        entry1 = await pool.getEntry(user1)
+        entry2 = await pool.getEntry(user2)
+        assert.equal(entry1.totalWinnings.toString(), ticketPrice.mul(new BN(20)).div(new BN(100)).toString())
+        assert.equal(entry2.totalWinnings.toString(), ticketPrice.mul(new BN(3)).mul(new BN(20)).div(new BN(100)).toString())
+      }
+      // should work with two groups
+      if (winningAddress === user3 || winningAddress === user4) {
+        entry1 = await pool.getEntry(user3)
+        entry2 = await pool.getEntry(user4)
+        assert.equal(entry1.totalWinnings.toString(), ticketPrice.mul(new BN(20)).div(new BN(100)).toString())
+        assert.equal(entry2.totalWinnings.toString(), ticketPrice.mul(new BN(3)).mul(new BN(20)).div(new BN(100)).toString())
+      }
+    })
+
+    it("should take into account unclaimed winnings in new drawing (no extra activation)", async () => {
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+      unclaimedWinnings = await pool.getUnclaimedWinnings();
+      assert.equal(unclaimedWinnings.toString(), ticketPrice.mul(new BN(4)).mul(new BN(20)).div(new BN(100)).toString())
+      await pool.buyTickets(1, {from: user1})
+      await pool.draw(secret2, secretHash3, { from: owner })
+      totalWinnings = unclaimedWinnings.add(ticketPrice.mul(new BN(20)).div(new BN(100)))
+      unclaimedWinnings = await pool.getUnclaimedWinnings();
+      assert.equal(unclaimedWinnings.toString(), totalWinnings.toString())
+      theFirst = await pool.getEntry(user1).totalWinnings
+      theSecond = await pool.getEntry(user2).totalWinnings
+      totalWinnings = theFirst.add(theSecond)
+      assert.equal(unclaimedWinnings.toString(), totalWinnings.toString())
+    })
+  })
+
+  describe("Withdrawal", () => {
+    beforeEach(async () => {
+      await token.approve(pool.address, priceForTenTickets, { from: user1 })
+      await token.approve(pool.address, priceForTenTickets, { from: user2 })
+      pool = await createPool()
+      await pool.setUsername("Biggy", { from: user1 })
+      await pool.setUsername("Floyd", { from: user2 })
+      await pool.setUsername("Queen", { from: user3 })
+      await pool.setUsername("Chance", { from: user4 })
+      await pool.buyTickets(3, { from: user1 })
+      await pool.buyTickets(3, { from: user2 })
+    })
+
+    it("should remove the correct amount of tokens from the money market", async () => {
+      // money market balance should decrease accordingly
+      balanceBefore = moneyMarket.balanceOfUnderlying(pool.address);
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      await pool.withdraw(1, {from: user1})
+      balanceAfter = moneymarket.balanceOfUnderlying(pool.address);
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice).toString())
+
+      // money market balance should decrease accordingly
+      balanceBefore = moneyMarket.balanceOfUnderlying(pool.address);
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      await pool.withdraw(1, { from: user2 })
+      balanceAfter = moneymarket.balanceOfUnderlying(pool.address);
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice).toString())
+
+      // money market balance should decrease accordingly
+      balanceBefore = moneyMarket.balanceOfUnderlying(pool.address);
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      await pool.withdraw(2, { from: user1 })
+      balanceAfter = moneymarket.balanceOfUnderlying(pool.address);
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice.mul(new BN(2))).toString())
+    })
+
+    it("should remove the correct amount of tokens from the money market post-activation", async () => {
+      await pool.activateEntries({ from: owner })
+      // money market balance should decrease accordingly
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      // money market balance should decrease accordingly
+      balanceBefore = moneyMarket.balanceOfUnderlying(pool.address);
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      await pool.withdraw(1, { from: user1 })
+      balanceAfter = moneymarket.balanceOfUnderlying(pool.address);
+      assert.equal(balanceAfter.toString(), new BN(balanceBefore).sub(ticketPrice).toString())
+
+      // money market balance should decrease accordingly
+      balanceBefore = moneyMarket.balanceOfUnderlying(pool.address);
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      await pool.withdraw(1, { from: user2 })
+      balanceAfter = moneymarket.balanceOfUnderlying(pool.address);
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice).toString())
+
+      // money market balance should decrease accordingly
+      balanceBefore = moneyMarket.balanceOfUnderlying(pool.address);
+      // redeem underlyuing should be lower by removedTokens * 1.2
+      await pool.withdraw(2, { from: user1 })
+      balanceAfter = moneymarket.balanceOfUnderlying(pool.address);
+      assert.equal(balanceAfter.toString(), balanceBefore.sub(ticketPrice.mul(new BN(2))).toString())
+    })
+
+    it("should choose withdraw all winnings for the user if available", async () => {
+      await pool.activateEntries({ from: owner })
+      await pool.draw(secret, secretHash2, { from: owner })
+
+      winningAddress = await pool.winnerAddress()
+      let theUser;
+      if (winningAddress === user1) {
+        theUser = user1;
+      } else {
+        theUser = user2
+      }
+
+      // user should receive totalWinnings worth of tokens
+
+
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(0, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = ticketPrice.mul(new BN(6)).mul(new BN(20)).div(new BN(100))
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      
+      // make sure winnings were removed
+      winnerEntryPostWithdraw = await pool.getEntry(theUser)
+      // totalWinnings should be set back to 0
+
+      // unclaimed winnings should be set to 0
+      assert.equal(winnerEntryPostWithdraw.totalWinnings.toString(), "0")
+      unclaimedWinnings = await pool.getUnclaimedWinnings()
+      assert.equal(unclaimedWinnings.toString(), "0")
+    })
+
+  it("should choose withdraw all winnings if available + one ticket", async () => {
+    await pool.activateEntries({ from: owner })
+    await pool.draw(secret, secretHash2, { from: owner })
+
+    winningAddress = await pool.winnerAddress()
+    let theUser;
+    if (winningAddress === user1) {
+      theUser = user1;
+    } else {
+      theUser = user2
+    }
+
+    marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+    tokenBalanceBefore = await token.balanceOf(theUser)
+    await pool.withdraw(1, { from: theUser })
+    marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+    tokenBalanceAfter = await token.balanceOf(theUser)
+    withdrawnValue = ticketPrice.mul(new BN(6)).mul(new BN(20)).div(new BN(100))
+    withdrawnValue = withdrawnValue.add(ticketPrice)
+    assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+    assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+
+    // make sure winnings were removed
+    winnerEntryPostWithdraw = await pool.getEntry(theUser)
+    assert.equal(winnerEntryPostWithdraw.totalWinnings.toString(), "0")
+    // totalWinnings should be set back to 0
+    // user should receive totalWinnings worth of tokens
+
+    // try withdrawing winnings and no tickets
+
+    // try withdrawing winnings and one ticket
+  })
+
+    it("should withdraw exactly the requested number of tickets post activation", async () => {
+      await pool.activateEntries({ from: owner })
+      // one ticket
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(1, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = withdrawnValue.add(ticketPrice)
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      entryPostWithdraw = await pool.getEntry(theUser)
+      assert.equal(entryPostWithdraw.ticketCount.toString(), "2")
+      assert.equal(entryPostWithdraw.amount.toString(), ticketPrice.mul(new BN(2)).toString())
+      // two tickets
+
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(1, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = withdrawnValue.add(ticketPrice)
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      entryPostWithdraw = await pool.getEntry(theUser)
+      assert.equal(entryPostWithdraw.ticketCount.toString(), "1")
+      assert.equal(entryPostWithdraw.amount.toString(), ticketPrice.toString())
+
+      // all tickets
+
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(1, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = withdrawnValue.add(ticketPrice)
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      entryPostWithdraw = await pool.getEntry(theUser)
+      assert.equal(entryPostWithdraw.ticketCount.toString(), "0")
+      assert.equal(entryPostWithdraw.amount.toString(), "0")
+    })
+
+    it("should withdraw exactly the requested number of tickets pre activation", async () => {
+      // one ticket
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(1, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = withdrawnValue.add(ticketPrice)
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      entryPostWithdraw = await pool.getPendingEntry(theUser)
+      assert.equal(entryPostWithdraw.ticketCount.toString(), "2")
+      assert.equal(entryPostWithdraw.amount.toString(), ticketPrice.mul(new BN(2)).toString())
+      // two tickets
+
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(1, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = withdrawnValue.add(ticketPrice)
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      entryPostWithdraw = await pool.getPendingEntry(theUser)
+      assert.equal(entryPostWithdraw.ticketCount.toString(), "1")
+      assert.equal(entryPostWithdraw.amount.toString(), ticketPrice.toString())
+
+      // all tickets
+
+      marketBalanceBefore = await moneyMarket.balanceOfUnderlying(pool.address);
+      tokenBalanceBefore = await token.balanceOf(theUser)
+      await pool.withdraw(1, { from: theUser })
+      marketBalanceAfter = await moneymarket.balanceOfUnderlying(pool.address);
+      tokenBalanceAfter = await token.balanceOf(theUser)
+      withdrawnValue = withdrawnValue.add(ticketPrice)
+      assert.equal(marketBalanceAfter.toString(), marketBalanceBefore.sub(withdrawnValue).toString())
+      assert.equal(tokenBalanceAfter.toString(), tokenBalanceBefore.add(withdrawnValue).toString())
+      entryPostWithdraw = await pool.getPendingEntry(theUser)
+      assert.equal(entryPostWithdraw.ticketCount.toString(), "0")
+      assert.equal(entryPostWithdraw.amount.toString(), "0")
+    })
+
+    it("should not allow you to withdraw more tickets than you have", async () => {
+      let failed;
+      try {
+        await pool.withdraw(4, {from: user1})
+        failed = false;
+      } catch {
+        failed = true;
+      }
+      assert.ok(failed);
+    })
+
+    it("should not allow you to withdraw without an entry", async () => {
+      let failed;
+      try {
+        await pool.withdraw(1, { from: user4 })
+        failed = false;
+      } catch {
+        failed = true;
+      }
+      assert.ok(failed);
+    })
+  })
+
+  // TODO: figure out if this breaks
+  describe('when fee fraction is greater than zero', () => {
+    beforeEach(() => {
+      /// Fee fraction is 10%
+      feeFraction = web3.utils.toWei('0.1', 'ether')
+    })
+
+    it('should reward the owner the fee', async () => {
+
+      const pool = await createPool()
+
+      const user1Tickets = ticketPrice.mul(new BN(100))
+      await token.approve(pool.address, user1Tickets, { from: user1 })
+      await pool.buyTickets(100, { from: user1 })
+
+      const ownerBalance = await token.balanceOf(owner)
+      // await pool.lock(secretHash, { from: owner })
+      await pool.activateEntries({ from: owner })
+
+      /// CErc20Mock awards 20% regardless of duration.
+      const totalDeposit = user1Tickets
+      const interestEarned = totalDeposit.mul(new BN(20)).div(new BN(100))
+      const fee = interestEarned.mul(new BN(10)).div(new BN(100))
+
+      // we expect unlocking to transfer the fee to the owner
+      // TODO: change to draw
+      await pool.draw(secret, secretHash2, { from: owner })
+
+      assert.equal((await pool.feeAmount()).toString(), fee.toString())
+
+      const newOwnerBalance = await token.balanceOf(owner)
+      assert.equal(newOwnerBalance.toString(), ownerBalance.add(fee).toString())
+
+      // we expect the pool winner to receive the interest less the fee
+      const user1Balance = await token.balanceOf(user1)
+      await pool.withdraw({ from: user1 })
+      const newUser1Balance = await token.balanceOf(user1)
+      assert.equal(newUser1Balance.toString(), user1Balance.add(user1Tickets).add(interestEarned).sub(fee).toString())
+    })
+  })
+
+
+  /*
       describe('withdraw() after unlock', () => {
         beforeEach(async () => {
           await pool.unlock({ from: user1 })
@@ -246,7 +951,7 @@ contract('Pool', (accounts) => {
           assert.equal(balanceDifference.toString(), netWinnings.toString())
         })
       })
-    })
+    }) 
 
     describe('complete(secret)', () => {
       describe('with one user', () => {
@@ -263,6 +968,7 @@ contract('Pool', (accounts) => {
           assert.equal(info.winner, user1)
         })
       })
+
 
       describe('with two users', () => {
         beforeEach(async () => {
@@ -288,6 +994,7 @@ contract('Pool', (accounts) => {
           }
         })
       })
+      
 
       it('should succeed even without a balance', async () => {
         await pool.lock(secretHash)
@@ -296,7 +1003,10 @@ contract('Pool', (accounts) => {
         assert.equal(info.winner, '0x0000000000000000000000000000000000000000')
       })
     })
+    */
 
+    // TODO:
+    /*
     describe('withdraw()', () => {
       it('should work for one participant', async () => {
         await token.approve(pool.address, ticketPrice, { from: user1 })
@@ -347,124 +1057,20 @@ contract('Pool', (accounts) => {
           throw new Error(`Unknown winner: ${info.winner}`)
         }
       })
-    })
 
-    describe('winnings()', () => {
-      it('should return the entrants total to withdraw', async () => {
-        await token.approve(pool.address, ticketPrice, { from: user1 })
-        await pool.buyTickets(1, { from: user1 })
+      it('should work in a group', async () => {
 
-        let winnings = await pool.winnings(user1)
-
-        assert.equal(winnings.toString(), ticketPrice.toString())
-      })
-    })
-  })
-
-  describe('when pool cannot be locked yet', () => {
-    beforeEach(async () => {
-      // one thousand seconds into future
-      const lockStartBlock = 15 * blocksPerMinute
-      const lockEndBlock = lockStartBlock + 15 * blocksPerMinute
-      pool = await createPool(lockStartBlock, lockEndBlock)
-    })
-
-    describe('lock()', () => {
-      beforeEach(async () => {
-        await token.approve(pool.address, ticketPrice, { from: user1 })
-        await pool.buyTickets(1, { from: user1 })
       })
 
-      it('should not work for regular users', async () => {
-        let failed
-        try {
-          await pool.lock({ from: user1 })
-          failed = false
-        } catch (error) {
-          failed = true
-        }
+      it('should work if youve won solo', async () => {
 
-        assert.ok(failed, "pool should not have locked")
       })
 
-      it('should support early locking by the owner', async () => {
-        await pool.lock(secretHash, { from: owner })
-      })
-    })
-  })
+      it('should work if youve won in a group', async () => {
 
-  describe('when pool cannot be unlocked yet', () => {
-    beforeEach(async () => {
-
-      // in the past
-      let lockStartBlock = -10
-
-      // in the future
-      let lockEndBlock = 15 * blocksPerMinute
-
-      pool = await createPool(lockStartBlock, lockEndBlock)
-    })
-
-    describe('complete(secret)', () => {
-      beforeEach(async () => {
-        await token.approve(pool.address, ticketPrice, { from: user1 })
-        await pool.buyTickets(1, { from: user1 })
-        await pool.lock(secretHash)
       })
 
-      it('should still work for the owner', async () => {
-        await pool.complete(secret)
-      })
-
-      it('should not work for anyone else', async () => {
-        let failed
-        try {
-          await pool.complete({ from: user1 })
-          failed = false
-        } catch (error) {
-          failed = true
-        }
-        assert.ok(failed, "call did not fail")
-      })
     })
-  })
-
-  describe('when fee fraction is greater than zero', () => {
-    beforeEach(() => {
-      /// Fee fraction is 10%
-      feeFraction = web3.utils.toWei('0.1', 'ether')
-    })
-
-    it('should reward the owner the fee', async () => {
-
-      const pool = await createPool(0, 1)
-
-      const user1Tickets = ticketPrice.mul(new BN(100))
-      await token.approve(pool.address, user1Tickets, { from: user1 })
-      await pool.buyTickets(100, { from: user1 })
-
-      const ownerBalance = await token.balanceOf(owner)
-      await pool.lock(secretHash, { from: owner })
-
-      /// CErc20Mock awards 20% regardless of duration.
-      const totalDeposit = user1Tickets
-      const interestEarned = totalDeposit.mul(new BN(20)).div(new BN(100))
-      const fee = interestEarned.mul(new BN(10)).div(new BN(100))
-
-      // we expect unlocking to transfer the fee to the owner
-      await pool.complete(secret, { from: owner })
-
-      assert.equal((await pool.feeAmount()).toString(), fee.toString())
-
-      const newOwnerBalance = await token.balanceOf(owner)
-      assert.equal(newOwnerBalance.toString(), ownerBalance.add(fee).toString())
-
-      // we expect the pool winner to receive the interest less the fee
-      const user1Balance = await token.balanceOf(user1)
-      await pool.withdraw({ from: user1 })
-      const newUser1Balance = await token.balanceOf(user1)
-      assert.equal(newUser1Balance.toString(), user1Balance.add(user1Tickets).add(interestEarned).sub(fee).toString())
-    })
-  })
+    */
 
 })
