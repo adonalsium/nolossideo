@@ -40,18 +40,6 @@ contract Pool is Ownable {
   event Withdrawn(address indexed sender, int256 amount, int256 remainingTickets);
 
   /**
-   * Emitted when the pool is locked.
-   */
-  event PoolLocked();
-
-  /**
-   * Emitted when the pool is unlocked.
-   */
-  event PoolUnlocked();
-
-  event TotalWinnings(int theWholeShebang);
-
-  /**
    * Emitted when the pool is complete. Total Winnings is unifixed.
    */
   event DrawingComplete(int256 winningGroup, int256 totalWinnings);
@@ -155,11 +143,9 @@ contract Pool is Ownable {
     _;
   }
 
-  event CheckPoint(int theGroupNum);
 
   modifier hasGroup {
     require(activeEntries[msg.sender].addr == msg.sender, "The user has not yet entered the game. Buy a ticket first.");
-    emit CheckPoint(activeEntries[msg.sender].groupId);
     require(activeEntries[msg.sender].groupId >= 0, "The user has not created or joined a group yet.");
     _;
   }
@@ -200,8 +186,7 @@ contract Pool is Ownable {
     return (theGroup.members, theGroup.allowedEntrants);
   }
 
-  event NewGroupMade(int idNewGroup);
-  event NewGroupAddress(address theaddie);
+  event NewGroupMade(int idNewGroup, address groupCreatorAddr);
 
   /**
    * @notice Creates a new group and places msg.sender within it
@@ -210,15 +195,12 @@ contract Pool is Ownable {
    //           and store the keys for that mapping in an array
   function createGroup() external hasEntry {
     int newGroupId = int(groups.length);
-    emit NewGroupMade(newGroupId);
     groups.length += 1;
     Group storage newGroup = groups[uint(newGroupId)];
     newGroup.members.push(msg.sender);
     Entry storage senderEntry = activeEntries[msg.sender];
     senderEntry.groupId = newGroupId;
-    emit NewGroupMade(senderEntry.groupId);
-    emit NewGroupAddress(senderEntry.addr);
-    emit NewGroupAddress(msg.sender);
+    emit NewGroupMade(senderEntry.groupId, msg.sender);
   }
 
   /**
@@ -266,10 +248,7 @@ contract Pool is Ownable {
     senderEntry.groupId = -1;
   }
 
-  event TesterGroupID(int256 theGroup);
-  event TesterAddress(address theAddressInvitee);
-  event TesterGroupState(uint256 theLength);
-
+  event UserInvited(int256 theGroup, address invitee, address invitor);
   /**
   * @notice Gives the passed user permission to join the group of msg.sender
   * @param _username the username of the user to invite
@@ -279,12 +258,10 @@ contract Pool is Ownable {
     // require that the user "_username" exists
     require(users[_username] != address(0), "User doesn't exist");
     address inviteeAddress = users[_username];
-    emit TesterAddress(inviteeAddress);
     int256 groupId = activeEntries[msg.sender].groupId;
-    emit TesterGroupID(groupId);
-    emit TesterGroupState(groups.length);
     Group storage invitingGroup = groups[uint(groupId)];
     invitingGroup.allowedEntrants.push(inviteeAddress);
+    emit UserInvited(groupId ,inviteeAddress, msg.sender);
   }
 
   function setUsername(string calldata _username) external {
@@ -305,8 +282,6 @@ contract Pool is Ownable {
     }
   }
 
-  event Pender(int256 theThing);
-  event SuperPender(int256 OGCount);
   event BalanceEvent(uint256 depositedBalance);
 
   /**
@@ -330,16 +305,10 @@ contract Pool is Ownable {
     if (_hasEntry(msg.sender)) {
       if (!_hasPendingEntry(msg.sender)) {
         pendingAddresses.push(msg.sender);
-        emit SuperPender(_countNonFixed);
         pendingEntries[msg.sender] = PendingEntry(msg.sender, totalDeposit, _countNonFixed);
       } else {
-        emit Pender(pendingEntries[msg.sender].amount);
-        emit Pender(totalDeposit);
         pendingEntries[msg.sender].amount = FixidityLib.add(pendingEntries[msg.sender].amount, totalDeposit);
-        emit Pender(pendingEntries[msg.sender].amount);
-        emit Pender(pendingEntries[msg.sender].ticketCount);
         pendingEntries[msg.sender].ticketCount = pendingEntries[msg.sender].ticketCount + _countNonFixed;
-        emit Pender(pendingEntries[msg.sender].ticketCount);
       }
     } else {
       activeEntries[msg.sender] = Entry(
@@ -350,10 +319,7 @@ contract Pool is Ownable {
         FixidityLib.newFixed(0),
         -1
       );
-      emit SuperPender(_countNonFixed);
       pendingEntries[msg.sender] = PendingEntry(msg.sender, totalDeposit, _countNonFixed);
-      emit SuperPender(pendingEntries[msg.sender].ticketCount);
-      emit SuperPender(pendingEntries[msg.sender].amount);
       entryCount = entryCount.add(1);
     }
 
@@ -445,7 +411,7 @@ contract Pool is Ownable {
     delete pendingAddresses;
   }
 
-  event NetTotalWinnings(int theThings);
+  event NetTotalWinnings(int theWinnings, address theWinner);
 
   /**
    * @notice Updates the payouts of all activeEntries in the winning group (entry.totalWinnings).
@@ -461,13 +427,10 @@ contract Pool is Ownable {
     // TODO: hacky, change group structure later
     finalAmount = FixidityLib.newFixed(int(moneyMarket.balanceOfUnderlying(address(this))));
     int256 totalMinusUnclaimedPrizes = FixidityLib.subtract(finalAmount, unclaimedWinnings);
-    emit TotalWinnings(FixidityLib.fromFixed(finalAmount));
-    emit TotalWinnings(FixidityLib.fromFixed(principleAmount));
-    emit TotalWinnings(FixidityLib.fromFixed(FixidityLib.subtract(totalMinusUnclaimedPrizes, principleAmount)));
     if (winner.groupId == -1) {
       // winner gets the whole shebang
       totalWinningsFixed = netWinningsFixedPoint24();
-      emit NetTotalWinnings(FixidityLib.fromFixed(totalWinningsFixed));
+      emit NetTotalWinnings(FixidityLib.fromFixed(totalWinningsFixed), _winningAddress);
       // reset prize pool
       unclaimedWinnings = FixidityLib.add(unclaimedWinnings, totalWinningsFixed);
       winner.totalWinnings = FixidityLib.add(winner.totalWinnings, totalWinningsFixed);
@@ -480,7 +443,7 @@ contract Pool is Ownable {
       }
       // get the total winnings from the drawing (minus the fee)
       totalWinningsFixed = netWinningsFixedPoint24();
-      emit NetTotalWinnings(FixidityLib.fromFixed(totalWinningsFixed));
+      emit NetTotalWinnings(FixidityLib.fromFixed(totalWinningsFixed),_winningAddress);
       // reset prize pool
       unclaimedWinnings = FixidityLib.add(unclaimedWinnings, totalWinningsFixed);
       // update payouts of all activeEntries in the group
@@ -497,7 +460,7 @@ contract Pool is Ownable {
 
   /**
    * @notice donate to prize pool
-   * @param amount amount to donate
+   * @param _amount amount to donate
    */
   function donateToPrizePool(uint _amount) external {
     require(_amount > 0, "amount of donation is less than or equal to zero");
@@ -505,6 +468,7 @@ contract Pool is Ownable {
     require(token.transferFrom(msg.sender, address(this), _countNonFixed), "token transfer failed");
 
     // send the newly sent tokens to the moneymarket
+    emit BalanceEvent(_countNonFixed);
     require(token.approve(address(moneyMarket), _countNonFixed), "could not approve money market spend");
     emit BalanceEvent(_countNonFixed);
     // TODO: DOES THIS WORK? Can you mint twice?
@@ -557,8 +521,6 @@ contract Pool is Ownable {
       // update sum tree to reflect withdrawn principle
       sortitionSumTrees.set(SUM_TREE_KEY, uint256(entry.amount), bytes32(uint256(msg.sender)));
     }
-    emit TotalWinnings(FixidityLib.fromFixed(principleToWithdraw));
-    emit TotalWinnings(FixidityLib.fromFixed(prizeToWithdraw));
     // calculate total withdrawal amount
     int256 totalToWithdraw = FixidityLib.add(prizeToWithdraw, principleToWithdraw);
     int256 totalToWithdrawNonFixed = FixidityLib.fromFixed(totalToWithdraw);
@@ -682,10 +644,11 @@ contract Pool is Ownable {
     );
   }
 
+  event Tester(string toTest);
   // TODO: test
-  function userInfo(address _addr) external view returns (
-    address addr,
-    string memory username,
+  function userInfo(address _addr) external returns (
+    address addrReturned,
+    string memory usernameReturned,
     int256 totalAmountReturned,
     int256 totalTicketsReturned,
     int256 activeAmountReturned,
@@ -698,6 +661,7 @@ contract Pool is Ownable {
     Entry storage entry = activeEntries[_addr];
     PendingEntry storage pendingEntry = pendingEntries[_addr];
     int256 totalAmount = FixidityLib.fromFixed(FixidityLib.add(pendingEntry.amount, entry.amount));
+    emit Tester(entry.username);
     return (
       entry.addr,
       entry.username,
@@ -837,8 +801,6 @@ contract Pool is Ownable {
     return activeEntries[_addr].addr == _addr;
   }
 
-  event AddressMatch(address daBoy);
-  event AddressMatchBool(bool isAMatch);
 
   /**
    * @notice Determines whether a given address has bought tickets
@@ -846,9 +808,6 @@ contract Pool is Ownable {
    * @return Returns true if the given address bought tickets, false otherwise.
    */
   function _hasPendingEntry(address _addr) internal returns (bool) {
-    emit AddressMatch(pendingEntries[_addr].addr);
-    emit AddressMatch(_addr);
-    emit AddressMatchBool(pendingEntries[_addr].addr == _addr);
     return pendingEntries[_addr].addr == _addr;
   }
 }
