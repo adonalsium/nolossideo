@@ -109,6 +109,7 @@ contract Pool is Ownable {
   // Needed to loops over pendingEntries in activateEntries
   address[] pendingAddresses;
 
+  // TODO: decrement entryCount on full withdrawal
   uint256 public entryCount;
   ICErc20 public moneyMarket;
   IERC20 public token;
@@ -495,6 +496,22 @@ contract Pool is Ownable {
   }
 
   /**
+   * @notice donate to prize pool
+   * @param amount amount to donate
+   */
+  function donateToPrizePool(uint _amount) external {
+    require(_amount > 0, "amount of donation is less than or equal to zero");
+    uint256 _countNonFixed = _amount;
+    require(token.transferFrom(msg.sender, address(this), _countNonFixed), "token transfer failed");
+
+    // send the newly sent tokens to the moneymarket
+    require(token.approve(address(moneyMarket), _countNonFixed), "could not approve money market spend");
+    emit BalanceEvent(_countNonFixed);
+    // TODO: DOES THIS WORK? Can you mint twice?
+    require(moneyMarket.mint(_countNonFixed) == 0, "could not supply money market");
+  }
+
+  /**
    * @notice Transfers a users deposit, and potential winnings, back to them.
    * The Pool must be unlocked.
    * The user must have deposited funds.  Fires the Withdrawn event.
@@ -662,6 +679,36 @@ contract Pool is Ownable {
       FixidityLib.fromFixed(maxPoolSizeFixedPoint24(FixidityLib.maxFixedDiv())),
       FixidityLib.fromFixed(currentInterestFractionFixedPoint24(), uint8(18)),
       secretHash
+    );
+  }
+
+  // TODO: test
+  function userInfo(address _addr) external view returns (
+    address addr,
+    string memory username,
+    int256 totalAmountReturned,
+    int256 totalTicketsReturned,
+    int256 activeAmountReturned,
+    int256 activeTicketsReturned,
+    int256 pendingAmountReturned,
+    int256 pendingTicketsReturned,
+    int256 totalWinningsReturned,
+    int256 groupIdReturned
+  ) {
+    Entry storage entry = activeEntries[_addr];
+    PendingEntry storage pendingEntry = pendingEntries[_addr];
+    int256 totalAmount = FixidityLib.fromFixed(FixidityLib.add(pendingEntry.amount, entry.amount));
+    return (
+      entry.addr,
+      entry.username,
+      totalAmount,
+      entry.ticketCount + pendingEntry.ticketCount,
+      FixidityLib.fromFixed(entry.amount),
+      entry.ticketCount,
+      FixidityLib.fromFixed(pendingEntry.amount),
+      pendingEntry.ticketCount,
+      FixidityLib.fromFixed(entry.totalWinnings),
+      entry.groupId
     );
   }
 
