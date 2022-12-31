@@ -35,7 +35,7 @@
     "truffle": "5.0.1",
     "truffle-deploy-registry": "0.5.0",
     "truffle-hdwallet-provider": "1.0.0-web3one.5",
-    "zos": "2.2.3",
+    "zos": "2.4.3",
     "zos-lib": "2.2.1",
     "zos-truffle-merge": "0.0.3"
   },
